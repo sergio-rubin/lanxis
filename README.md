@@ -21,7 +21,7 @@ Las compilaciones nativas se hacen en su sistema correspondiente. `flutter build
 
 El diseño factorial E1–E6 reproduce la investigación «Proyecto Final - Servidor Hotspot (Requerimientos y Estadísticas)» proporcionada por el responsable. Las distancias nominales son 1, 6 y 12 m, con un cliente o 3–5 clientes. El tamaño de referencia es 100 solicitudes por escenario y es configurable. RTT HTTP, jitter, throughput, errores y contexto se guardan por ensayo; nunca se presentan resultados de ejemplo como mediciones reales.
 
-En **Análisis** se puede filtrar por sesión, fase, prueba y ensayo. La selección puede exportarse como CSV, JSON, XLSX, PDF o ZIP; el ZIP incluye manifiesto y hashes SHA-256. En **Red local**, las transferencias HTTP de descarga y subida usan bloques reproducibles con verificación de integridad. Los participantes coordinados conservan lotes de resultados pendientes en SQLite hasta recibir confirmación.
+En **Análisis** se puede filtrar por sesión, fase, prueba y ensayo, y explorar distribuciones teóricas con parámetros propios. La selección puede exportarse como CSV, JSON, XLSX, PDF o ZIP; el ZIP incluye manifiesto y hashes SHA-256. En **Red local**, las transferencias HTTP y TCP de descarga y subida usan bloques reproducibles con verificación de integridad; el eco UDP mide respuesta o ausencia de respuesta por datagrama. Los participantes coordinados conservan lotes de resultados pendientes en SQLite hasta recibir confirmación.
 
 ## Licencia
 

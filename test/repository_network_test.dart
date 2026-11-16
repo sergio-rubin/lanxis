@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -5,6 +6,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:lanxis/core/models.dart';
 import 'package:lanxis/data/lab_repository.dart';
 import 'package:lanxis/network/network_lab.dart';
+import 'package:lanxis/network/tcp_transfer.dart';
+import 'package:lanxis/network/udp_echo.dart';
 
 void main() {
   test('client identity and result outbox survive reopening SQLite', () async {
@@ -147,6 +150,129 @@ void main() {
       );
     },
   );
+
+  test('TCP engine streams both directions and records protocol', () async {
+    final repo = LabRepository.inMemory();
+    final network = NetworkLab(repo);
+    addTearDown(() async {
+      await network.stopServer();
+      repo.dispose();
+    });
+    final port = await network.startServer(port: 0);
+    final base = Uri.parse('http://127.0.0.1:$port');
+    final health = await network.probe(base);
+    expect((health['capabilities'] as List).contains('tcp-transfer'), true);
+    expect(health['tcp_port'], isA<int>());
+    await expectLater(
+      TcpTransferClient.sample(
+        host: '127.0.0.1',
+        port: health['tcp_port'] as int,
+        code: '000000',
+        requestId: '00000000-0000-0000-0000-000000000000',
+        direction: 'download',
+        bytes: 32,
+        timeout: const Duration(seconds: 5),
+      ),
+      throwsStateError,
+    );
+    final session = repo.createSession('TCP loopback');
+    final phase = repo.createPhase(session.id, 'Transferencia');
+    for (final direction in ['download', 'upload']) {
+      final results = await network.runTrial(
+        base: base,
+        code: network.pairCode!,
+        session: session,
+        phase: phase,
+        config: TrialConfig(
+          scenarioId: 'Libre',
+          clients: 1,
+          distanceM: 0,
+          count: 2,
+          warmup: 0,
+          intervalMs: 0,
+          payloadBytes: 123457,
+          protocol: 'tcp',
+          direction: direction,
+        ),
+      );
+      expect(results.length, 2);
+      expect(results.every((m) => m.success && m.protocol == 'tcp'), true);
+      expect(
+        results.every(
+          (m) => direction == 'upload'
+              ? m.bytesSent == 123457 && m.speedMbps != null
+              : m.bytesReceived == 123457 && m.speedMbps != null,
+        ),
+        true,
+      );
+    }
+    final ping = await network.runTrial(
+      base: base,
+      code: network.pairCode!,
+      session: session,
+      phase: phase,
+      config: const TrialConfig(
+        scenarioId: 'Libre',
+        clients: 1,
+        distanceM: 0,
+        count: 1,
+        warmup: 0,
+        intervalMs: 0,
+        protocol: 'tcp',
+      ),
+    );
+    expect(ping.single.success, true);
+    expect(ping.single.bytesReceived, 0);
+  });
+
+  test('UDP echo records successful RTT and an observed timeout', () async {
+    final repo = LabRepository.inMemory();
+    final network = NetworkLab(repo);
+    addTearDown(() async {
+      await network.stopServer();
+      repo.dispose();
+    });
+    final port = await network.startServer(port: 0);
+    final base = Uri.parse('http://127.0.0.1:$port');
+    final health = await network.probe(base);
+    expect((health['capabilities'] as List).contains('udp-echo'), true);
+    await expectLater(
+      UdpEchoClient.sample(
+        host: '127.0.0.1',
+        port: health['udp_port'] as int,
+        code: '000000',
+        requestId: '00000000-0000-0000-0000-000000000000',
+        payloadBytes: 8,
+        timeout: const Duration(milliseconds: 150),
+      ),
+      throwsA(isA<TimeoutException>()),
+    );
+    final session = repo.createSession('UDP loopback');
+    final phase = repo.createPhase(session.id, 'Eco');
+    final results = await network.runTrial(
+      base: base,
+      code: network.pairCode!,
+      session: session,
+      phase: phase,
+      config: const TrialConfig(
+        scenarioId: 'Libre',
+        clients: 1,
+        distanceM: 0,
+        count: 3,
+        warmup: 0,
+        intervalMs: 0,
+        payloadBytes: 32,
+        protocol: 'udp',
+      ),
+    );
+    expect(results.length, 3);
+    expect(results.every((m) => m.success && m.protocol == 'udp'), true);
+    expect(
+      results.every((m) => m.bytesReceived > 32 && m.speedMbps == null),
+      true,
+    );
+    expect(results.every((m) => m.bytesSent == m.bytesReceived), true);
+  });
 
   test(
     'two participant instances coordinate E4 and preserve provenance',

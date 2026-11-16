@@ -911,6 +911,7 @@ class _NetworkScreenState extends State<NetworkScreen> {
   String? phaseId;
   String scenario = 'E1';
   String direction = 'download';
+  String protocol = 'http';
   bool busy = false;
   bool cancel = false;
   bool coordinating = false;
@@ -1139,6 +1140,7 @@ class _NetworkScreenState extends State<NetworkScreen> {
             distanceM: d,
             count: n,
             payloadBytes: bytes,
+            protocol: protocol,
             direction: direction,
             intervalMs: everyMs,
             timeoutMs: timeoutMs,
@@ -1164,6 +1166,7 @@ class _NetworkScreenState extends State<NetworkScreen> {
           distanceM: d,
           count: n,
           payloadBytes: bytes,
+          protocol: protocol,
           direction: direction,
           intervalMs: everyMs,
           timeoutMs: timeoutMs,
@@ -1509,6 +1512,41 @@ class _NetworkScreenState extends State<NetworkScreen> {
                         SizedBox(
                           width: 160,
                           child: DropdownButtonFormField<String>(
+                            initialValue: protocol,
+                            decoration: const InputDecoration(
+                              labelText: 'Protocolo',
+                            ),
+                            items: const [
+                              DropdownMenuItem(
+                                value: 'http',
+                                child: Text('HTTP'),
+                              ),
+                              DropdownMenuItem(
+                                value: 'tcp',
+                                child: Text('TCP'),
+                              ),
+                              DropdownMenuItem(
+                                value: 'udp',
+                                child: Text('UDP eco'),
+                              ),
+                            ],
+                            onChanged: busy
+                                ? null
+                                : (value) {
+                                    if (value != null) {
+                                      setState(() {
+                                        protocol = value;
+                                        if (value == 'udp') {
+                                          direction = 'download';
+                                        }
+                                      });
+                                    }
+                                  },
+                          ),
+                        ),
+                        SizedBox(
+                          width: 160,
+                          child: DropdownButtonFormField<String>(
                             initialValue: scenario,
                             decoration: const InputDecoration(
                               labelText: 'Escenario',
@@ -1557,6 +1595,7 @@ class _NetworkScreenState extends State<NetworkScreen> {
                         SizedBox(
                           width: 160,
                           child: DropdownButtonFormField<String>(
+                            key: ValueKey('direction-$protocol-$direction'),
                             initialValue: direction,
                             decoration: const InputDecoration(
                               labelText: 'Transferencia',
@@ -1571,7 +1610,7 @@ class _NetworkScreenState extends State<NetworkScreen> {
                                 child: Text('Subida'),
                               ),
                             ],
-                            onChanged: busy
+                            onChanged: busy || protocol == 'udp'
                                 ? null
                                 : (value) {
                                     if (value != null) {
@@ -2237,6 +2276,10 @@ class _InferencePanel extends StatelessWidget {
     final e3 = items.where((m) => m.scenarioId == 'E3').toList();
     final pE3 = ProbabilityEngine.severeLagRate(e3);
     final lagP = EventModels.lagProbability(items);
+    final udp = items.where((m) => m.protocol == 'udp').toList();
+    final udpTimeouts = udp
+        .where((m) => m.error?.toLowerCase().contains('timeout') ?? false)
+        .length;
     final poissonRate = EventModels.spikeRatePerMinute(items);
     final exponentialRate = EventModels.exponentialRate(items);
     final e1 = items
@@ -2312,6 +2355,10 @@ class _InferencePanel extends StatelessWidget {
             'P(lag > 50 ms | multicliente): ${DescriptiveEngine.conditionalLagMulticlient(items)?.letPercent() ?? 'sin datos'}',
           ),
           Text('P(lag > 50 ms): ${lagP?.letPercent() ?? 'sin datos'}'),
+          if (udp.isNotEmpty)
+            Text(
+              'Sin eco UDP: $udpTimeouts/${udp.length} datagramas (${(udpTimeouts / udp.length).letPercent()}). Incluye posibles bloqueos de firewall o del dispositivo.',
+            ),
           Text(
             'P(multicliente): ${(items.where((m) => m.clients > 1).length / items.length).letPercent()}',
           ),

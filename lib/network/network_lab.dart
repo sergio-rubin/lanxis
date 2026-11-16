@@ -8,6 +8,8 @@ import 'package:uuid/uuid.dart';
 
 import '../core/models.dart';
 import '../data/lab_repository.dart';
+import 'tcp_transfer.dart';
+import 'udp_echo.dart';
 
 class DiscoveredServer {
   const DiscoveredServer(this.address, this.port);
@@ -47,6 +49,8 @@ class NetworkLab {
   static const maxDownloadBytes = 100 * 1024 * 1024;
   static const _uuid = Uuid();
   HttpServer? _server;
+  TcpTransferServer? _tcpTransfer;
+  UdpEchoServer? _udpEcho;
   RawDatagramSocket? _discoverySocket;
   StreamSubscription<RawSocketEvent>? _discoverySubscription;
   int _activeTransfers = 0;
@@ -79,6 +83,20 @@ class NetworkLab {
     );
     _pairCode = (100000 + Random.secure().nextInt(900000)).toString();
     _server = server;
+    try {
+      final transfer = TcpTransferServer(_pairCode!, maxDownloadBytes);
+      await transfer.start();
+      _tcpTransfer = transfer;
+    } on SocketException {
+      // HTTP remains usable if this device cannot open a second port.
+    }
+    try {
+      final echo = UdpEchoServer(_pairCode!);
+      await echo.start();
+      _udpEcho = echo;
+    } on SocketException {
+      // Datagram echo is optional when the platform denies UDP binding.
+    }
     try {
       final discovery = await RawDatagramSocket.bind(
         InternetAddress.anyIPv4,
@@ -115,6 +133,10 @@ class NetworkLab {
   }
 
   Future<void> stopServer() async {
+    await _udpEcho?.close();
+    _udpEcho = null;
+    await _tcpTransfer?.close();
+    _tcpTransfer = null;
     await _discoverySubscription?.cancel();
     _discoverySubscription = null;
     _discoverySocket?.close();
@@ -180,12 +202,16 @@ class NetworkLab {
           jsonEncode({
             'name': 'LANXIS',
             'version': protocolVersion,
+            if (_tcpTransfer?.port != null) 'tcp_port': _tcpTransfer!.port,
+            if (_udpEcho?.port != null) 'udp_port': _udpEcho!.port,
             'capabilities': [
               'http-ping',
               'http-download',
               'http-upload',
               'http-register',
               'coordinated-trial',
+              if (_tcpTransfer != null) 'tcp-transfer',
+              if (_udpEcho != null) 'udp-echo',
               if (_discoverySocket != null) 'udp-discovery',
             ],
           }),
@@ -666,7 +692,11 @@ class NetworkLab {
         config.count > 100000 ||
         config.payloadBytes < 0 ||
         config.payloadBytes > maxDownloadBytes ||
+        (config.protocol == 'udp' &&
+            config.payloadBytes > UdpEchoServer.maxPayloadBytes) ||
         config.timeoutMs < 100 ||
+        !{'http', 'tcp', 'udp'}.contains(config.protocol) ||
+        (config.protocol == 'udp' && config.direction != 'download') ||
         config.intervalMs < 0 ||
         !{'download', 'upload'}.contains(config.direction) ||
         (config.direction == 'upload' && config.payloadBytes == 0)) {
@@ -788,8 +818,12 @@ class NetworkLab {
         config.count > 100000 ||
         config.payloadBytes < 0 ||
         config.payloadBytes > maxDownloadBytes ||
+        (config.protocol == 'udp' &&
+            config.payloadBytes > UdpEchoServer.maxPayloadBytes) ||
         config.intervalMs < 0 ||
         config.timeoutMs < 100 ||
+        !{'http', 'tcp', 'udp'}.contains(config.protocol) ||
+        (config.protocol == 'udp' && config.direction != 'download') ||
         !{'download', 'upload'}.contains(config.direction) ||
         (config.direction == 'upload' && config.payloadBytes == 0)) {
       throw ArgumentError('Configuración fuera de límites');
@@ -802,6 +836,15 @@ class NetworkLab {
       );
     }
     await register(base, code);
+    final capabilities = config.protocol == 'http' ? null : await probe(base);
+    final tcpPort = capabilities?['tcp_port'] as int?;
+    final udpPort = capabilities?['udp_port'] as int?;
+    if (config.protocol == 'tcp' && tcpPort == null) {
+      throw UnsupportedError('Este servidor no ofrece transferencias TCP');
+    }
+    if (config.protocol == 'udp' && udpPort == null) {
+      throw UnsupportedError('Este servidor no ofrece eco UDP');
+    }
     final testId = repository.createTest(phase.id, config.scenarioId, config);
     final trialId = repository.startTrial(testId);
     final client = HttpClient()
@@ -824,82 +867,110 @@ class NetworkLab {
         var invalidPayload = false;
         final body = BytesBuilder(copy: false);
         try {
-          final upload = config.direction == 'upload';
-          final uri = base.resolve(
-            upload
-                ? '/upload?bytes=${config.payloadBytes}'
-                : config.payloadBytes > 0
-                ? '/download?bytes=${config.payloadBytes}'
-                : '/ping?id=$requestId',
-          );
-          final request =
-              await (upload ? client.postUrl(uri) : client.getUrl(uri)).timeout(
-                Duration(milliseconds: config.timeoutMs),
-              );
-          request.headers.set('X-Lanxis-Code', code);
-          if (upload) {
-            request.contentLength = config.payloadBytes;
-            final block = List<int>.generate(64 * 1024, (j) => j % 251);
-            while (bytesSent < config.payloadBytes) {
-              final length = min(block.length, config.payloadBytes - bytesSent);
-              request.add(
-                length == block.length ? block : block.sublist(0, length),
-              );
-              bytesSent += length;
-              if (bytesSent % (1024 * 1024) < block.length) {
-                await request.flush().timeout(
-                  Duration(milliseconds: config.timeoutMs),
+          if (config.protocol == 'tcp') {
+            final sample = await TcpTransferClient.sample(
+              host: base.host,
+              port: tcpPort!,
+              code: code,
+              requestId: requestId,
+              direction: config.direction,
+              bytes: config.payloadBytes,
+              timeout: Duration(milliseconds: config.timeoutMs),
+              onBytesSent: (value) => bytesSent = value,
+            );
+            bytes = sample.bytesReceived;
+            bytesSent = sample.bytesSent;
+          } else if (config.protocol == 'udp') {
+            final echoed = await UdpEchoClient.sample(
+              host: base.host,
+              port: udpPort!,
+              code: code,
+              requestId: requestId,
+              payloadBytes: config.payloadBytes,
+              timeout: Duration(milliseconds: config.timeoutMs),
+              onSent: (value) => bytesSent = value,
+            );
+            bytes = echoed;
+          } else {
+            final upload = config.direction == 'upload';
+            final uri = base.resolve(
+              upload
+                  ? '/upload?bytes=${config.payloadBytes}'
+                  : config.payloadBytes > 0
+                  ? '/download?bytes=${config.payloadBytes}'
+                  : '/ping?id=$requestId',
+            );
+            final request =
+                await (upload ? client.postUrl(uri) : client.getUrl(uri))
+                    .timeout(Duration(milliseconds: config.timeoutMs));
+            request.headers.set('X-Lanxis-Code', code);
+            if (upload) {
+              request.contentLength = config.payloadBytes;
+              final block = List<int>.generate(64 * 1024, (j) => j % 251);
+              while (bytesSent < config.payloadBytes) {
+                final length = min(
+                  block.length,
+                  config.payloadBytes - bytesSent,
                 );
-              }
-            }
-          }
-          final response = await request.close().timeout(
-            Duration(milliseconds: config.timeoutMs),
-          );
-          httpStatus = response.statusCode;
-          await for (final chunk in response.timeout(
-            Duration(milliseconds: config.timeoutMs),
-          )) {
-            if (!upload &&
-                config.payloadBytes > 0 &&
-                bytes + chunk.length > config.payloadBytes) {
-              throw StateError('La descarga excedió el tamaño solicitado');
-            }
-            if ((upload || config.payloadBytes == 0) &&
-                body.length + chunk.length > 4096) {
-              throw StateError('La respuesta excedió 4 KiB');
-            }
-            if (response.statusCode == 200 &&
-                !upload &&
-                config.payloadBytes > 0) {
-              for (var j = 0; j < chunk.length; j++) {
-                if (chunk[j] != ((bytes + j) % (64 * 1024)) % 251) {
-                  invalidPayload = true;
+                request.add(
+                  length == block.length ? block : block.sublist(0, length),
+                );
+                bytesSent += length;
+                if (bytesSent % (1024 * 1024) < block.length) {
+                  await request.flush().timeout(
+                    Duration(milliseconds: config.timeoutMs),
+                  );
                 }
               }
-            } else if (upload || config.payloadBytes == 0) {
-              body.add(chunk);
             }
-            bytes += chunk.length;
-          }
-          if (response.statusCode != 200) {
-            error = 'HTTP ${response.statusCode}';
-          } else if (upload) {
-            final data = jsonDecode(utf8.decode(body.takeBytes()));
-            if (data is! Map ||
-                data['bytes_received'] != config.payloadBytes ||
-                data['integrity'] != 'ok') {
-              error = 'La subida no pasó la verificación de integridad';
+            final response = await request.close().timeout(
+              Duration(milliseconds: config.timeoutMs),
+            );
+            httpStatus = response.statusCode;
+            await for (final chunk in response.timeout(
+              Duration(milliseconds: config.timeoutMs),
+            )) {
+              if (!upload &&
+                  config.payloadBytes > 0 &&
+                  bytes + chunk.length > config.payloadBytes) {
+                throw StateError('La descarga excedió el tamaño solicitado');
+              }
+              if ((upload || config.payloadBytes == 0) &&
+                  body.length + chunk.length > 4096) {
+                throw StateError('La respuesta excedió 4 KiB');
+              }
+              if (response.statusCode == 200 &&
+                  !upload &&
+                  config.payloadBytes > 0) {
+                for (var j = 0; j < chunk.length; j++) {
+                  if (chunk[j] != ((bytes + j) % (64 * 1024)) % 251) {
+                    invalidPayload = true;
+                  }
+                }
+              } else if (upload || config.payloadBytes == 0) {
+                body.add(chunk);
+              }
+              bytes += chunk.length;
             }
-          } else if (config.payloadBytes > 0 &&
-              (invalidPayload || bytes != config.payloadBytes)) {
-            error = 'La transferencia no pasó la verificación de integridad';
-          } else if (config.payloadBytes == 0) {
-            final data = jsonDecode(utf8.decode(body.takeBytes()));
-            if (data is! Map ||
-                data['request_id'] != requestId ||
-                data['protocol'] != protocolVersion) {
-              error = 'Respuesta de ping no coincide con la petición';
+            if (response.statusCode != 200) {
+              error = 'HTTP ${response.statusCode}';
+            } else if (upload) {
+              final data = jsonDecode(utf8.decode(body.takeBytes()));
+              if (data is! Map ||
+                  data['bytes_received'] != config.payloadBytes ||
+                  data['integrity'] != 'ok') {
+                error = 'La subida no pasó la verificación de integridad';
+              }
+            } else if (config.payloadBytes > 0 &&
+                (invalidPayload || bytes != config.payloadBytes)) {
+              error = 'La transferencia no pasó la verificación de integridad';
+            } else if (config.payloadBytes == 0) {
+              final data = jsonDecode(utf8.decode(body.takeBytes()));
+              if (data is! Map ||
+                  data['request_id'] != requestId ||
+                  data['protocol'] != protocolVersion) {
+                error = 'Respuesta de ping no coincide con la petición';
+              }
             }
           }
         } catch (e) {
@@ -914,6 +985,7 @@ class NetworkLab {
         if (rtt != null) previousRtt = rtt;
         final speed =
             success &&
+                config.protocol != 'udp' &&
                 config.payloadBytes > 0 &&
                 (config.direction == 'upload' ? bytesSent : bytes) > 0 &&
                 stopwatch.elapsedMicroseconds > 0
@@ -941,6 +1013,7 @@ class NetworkLab {
           httpStatus: httpStatus,
           error: error,
           warmup: i < config.warmup,
+          protocol: config.protocol,
           clientId: clientId,
         );
         repository.addMeasurement(item);
