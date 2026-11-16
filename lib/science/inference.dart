@@ -135,6 +135,16 @@ class ProbabilityEngine {
     );
   }
 
+  static double binomialCdf(int n, int k, double p) {
+    if (n < 0 || !p.isFinite || p < 0 || p > 1) {
+      throw ArgumentError('Parámetros binomiales inválidos');
+    }
+    if (k < 0) return 0;
+    if (k >= n || p == 0) return 1;
+    if (p == 1) return 0;
+    return special.ibeta(1 - p, n - k, k + 1).clamp(0, 1);
+  }
+
   static double geometricAttemptsMean(double p) {
     if (p < 0 || p > 1) throw ArgumentError.value(p);
     return p == 0 ? double.infinity : 1 / p;
@@ -159,6 +169,15 @@ class ProbabilityEngine {
     }
     if (lambda == 0) return k == 0 ? 1 : 0;
     return exp(k * log(lambda) - lambda - special.gammaLn(k + 1));
+  }
+
+  static double poissonCdf(int k, double lambda) {
+    if (!lambda.isFinite || lambda < 0) {
+      throw ArgumentError('Parámetros Poisson inválidos');
+    }
+    if (k < 0) return 0;
+    if (lambda == 0) return 1;
+    return (1 - special.lowRegGamma(k + 1, lambda)).clamp(0, 1);
   }
 
   static double normalArea(double a, double b, double mean, double sd) {

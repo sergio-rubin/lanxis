@@ -26,6 +26,15 @@ void main() {
       expect(ProbabilityEngine.binomialPmf(0, 0, 0), 1);
       expect(ProbabilityEngine.binomialPmf(20, 20, 1), 1);
       expect(ProbabilityEngine.poissonPmf(0, 0), 1);
+      expect(
+        ProbabilityEngine.binomialCdf(20, 5, .2),
+        closeTo(.8042077855, 1e-9),
+      );
+      expect(ProbabilityEngine.poissonCdf(2, 3), closeTo(.4231900811, 1e-9));
+      expect(
+        ProbabilityEngine.binomialCdf(1000, 500, .5),
+        inInclusiveRange(.50, .52),
+      );
     },
   );
 

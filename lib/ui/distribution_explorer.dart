@@ -103,31 +103,40 @@ class _DistributionExplorerState extends State<DistributionExplorer> {
         'Geométrica' => ProbabilityEngine.geometricPmf(x, p),
         _ => ProbabilityEngine.poissonPmf(x, lambda),
       };
+      double accumulated(int x) => switch (model) {
+        'Bernoulli' =>
+          x < 0
+              ? 0
+              : x == 0
+              ? 1 - p
+              : 1,
+        'Binomial' => ProbabilityEngine.binomialCdf(n, x, p),
+        'Geométrica' => x < 1 ? 0 : 1 - math.pow(1 - p, x).toDouble(),
+        _ => ProbabilityEngine.poissonCdf(x, lambda),
+      };
       final start = model == 'Geométrica' ? 1 : 0;
       final naturalEnd = switch (model) {
         'Bernoulli' => 1,
         'Binomial' => n,
-        'Geométrica' => p == 0 ? 20 : math.max(12, (6 / p).ceil()),
-        _ => math.max(12, (lambda + 5 * math.sqrt(lambda)).ceil()),
+        'Geométrica' =>
+          p == 0 ? math.max(20, k) : math.max(k, math.max(12, (6 / p).ceil())),
+        _ => math.max(k, math.max(12, (lambda + 5 * math.sqrt(lambda)).ceil())),
       };
-      // Keep charts readable for large parameters while evaluating the selected k.
-      final end = math.max(start, math.min(naturalEnd, 80));
+      // Keep k visible while preserving the exact CDF at the window edge.
+      final first = naturalEnd - start > 80
+          ? (k - 40).clamp(start, naturalEnd - 80).toInt()
+          : start;
+      final end = math.min(naturalEnd, first + 80);
       final density = <FlSpot>[];
       final cdf = <FlSpot>[];
-      var running = 0.0;
-      for (var x = start; x <= end; x++) {
+      var running = accumulated(first - 1);
+      for (var x = first; x <= end; x++) {
         final y = mass(x);
         running += y;
         density.add(FlSpot(x.toDouble(), y));
         cdf.add(FlSpot(x.toDouble(), running.clamp(0, 1)));
       }
-      return (
-        density: density,
-        cdf: cdf,
-        result: mass(k),
-        detail:
-            'P(X = $k)${k > end ? ' · k fuera del tramo visible de la gráfica' : ''}',
-      );
+      return (density: density, cdf: cdf, result: mass(k), detail: 'P(X = $k)');
     }
     final a = _value('a');
     final b = _value('b');
@@ -325,7 +334,7 @@ class _DistributionExplorerState extends State<DistributionExplorer> {
             const SizedBox(height: 5),
             Text(
               discrete
-                  ? 'La gráfica muestra hasta 80 valores; la probabilidad de k se calcula exactamente fuera de ese tramo.'
+                  ? 'La gráfica muestra hasta 81 valores alrededor de k; la acumulada incluye toda la cola anterior.'
                   : 'Área entre a y b calculada con la función acumulada; la gráfica muestra densidad o acumulada.',
               style: Theme.of(context).textTheme.bodySmall,
             ),

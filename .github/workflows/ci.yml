@@ -62,7 +62,14 @@ jobs:
           channel: stable
           cache: true
       - run: flutter pub get
-      - run: flutter build apk --release --split-per-abi
+      - name: Build Android APKs
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if flutter build apk --release --split-per-abi; then exit 0; fi
+            if [ "$attempt" -eq 3 ]; then exit 1; fi
+            sleep 15
+          done
       - run: sha256sum build/app/outputs/flutter-apk/*.apk > android.sha256
       - uses: actions/upload-artifact@v7
         with:

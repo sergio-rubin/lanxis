@@ -1,3 +1,4 @@
+import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lanxis/science/inference.dart';
 import 'package:lanxis/ui/distribution_explorer.dart';
@@ -34,6 +35,14 @@ void main() {
     await tester.enterText(find.byType(TextField).at(2), '1.5');
     await tester.pump();
     expect(find.textContaining('Revisa el dominio'), findsOneWidget);
+
+    await tester.enterText(find.byType(TextField).at(0), '1000');
+    await tester.enterText(find.byType(TextField).at(1), '500');
+    await tester.enterText(find.byType(TextField).at(2), '0.5');
+    await tester.pump();
+    expect(find.textContaining('2.523%'), findsOneWidget);
+    final chart = tester.widget<LineChart>(find.byType(LineChart));
+    expect(chart.data.lineBarsData.single.spots.first.x, 460);
   });
 
   testWidgets('continuous model renders on a narrow screen', (tester) async {
