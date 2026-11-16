@@ -1,0 +1,215 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:lanxis/core/models.dart';
+import 'package:lanxis/data/lab_repository.dart';
+import 'package:lanxis/network/network_lab.dart';
+
+void main() {
+  test('client identity and result outbox survive reopening SQLite', () async {
+    final directory = await Directory.systemTemp.createTemp('lanxis-outbox-');
+    addTearDown(() => directory.delete(recursive: true));
+    final file = File('${directory.path}/lab.sqlite');
+    final first = LabRepository.openAt(file);
+    final identity = first.clientIdentity;
+    final queued = first.queueResult('http://127.0.0.1:8040', '{"job_id":"j"}');
+    first.dispose();
+    final second = LabRepository.openAt(file);
+    expect(second.clientIdentity, identity);
+    expect(second.pendingResultCount, 1);
+    expect(second.pendingResults('http://127.0.0.1:8040').single['id'], queued);
+    second.acknowledgeResult(queued);
+    expect(second.pendingResultCount, 0);
+    second.dispose();
+  });
+
+  test('session hierarchy and duplicate request protection', () {
+    final repo = LabRepository.inMemory();
+    addTearDown(repo.dispose);
+    final session = repo.createSession('Estudio');
+    final phase = repo.createPhase(session.id, 'Fase 1');
+    final testId = repo.createTest(
+      phase.id,
+      'E1',
+      const TrialConfig(scenarioId: 'E1', clients: 1, distanceM: 1, count: 1),
+    );
+    final trialId = repo.startTrial(testId);
+    final m = Measurement(
+      id: 'm1',
+      sessionId: session.id,
+      phaseId: phase.id,
+      testId: testId,
+      trialId: trialId,
+      requestId: 'request-1',
+      scenarioId: 'E1',
+      clients: 1,
+      distanceM: 1,
+      timestampUtc: DateTime.now().toUtc(),
+      success: true,
+      bytesReceived: 10,
+      latencyMs: 12,
+    );
+    repo.addMeasurement(m);
+    repo.addMeasurement(m);
+    expect(repo.measurementCount(session.id), 1);
+    expect(repo.phases(session.id).single.name, 'Fase 1');
+    repo.updatePhaseStatus(session.id, phase.id, 'paused');
+    expect(repo.phases(session.id).single.status, 'paused');
+    repo.updateSessionStatus(session.id, 'finished');
+    expect(repo.sessions().single.status, 'finished');
+  });
+
+  test(
+    'HTTP server, pairing, RTT and streaming transfer on loopback',
+    () async {
+      final repo = LabRepository.inMemory();
+      final network = NetworkLab(repo);
+      addTearDown(() async {
+        await network.stopServer();
+        repo.dispose();
+      });
+      final port = await network.startServer(port: 0);
+      final base = Uri.parse('http://127.0.0.1:$port');
+      final health = await network.probe(base);
+      expect(health['version'], 1);
+      expect((health['capabilities'] as List).contains('udp-discovery'), true);
+      final discovered = await network.discover(
+        duration: const Duration(milliseconds: 100),
+        target: InternetAddress.loopbackIPv4,
+      );
+      expect(discovered.any((server) => server.port == port), true);
+      final registration = await network.register(base, network.pairCode!);
+      expect(registration['client_id'], network.clientId);
+      expect(network.connectedClients, 1);
+      final session = repo.createSession('Loopback');
+      final phase = repo.createPhase(session.id, 'Transferencia');
+      final results = await network.runTrial(
+        base: base,
+        code: network.pairCode!,
+        session: session,
+        phase: phase,
+        config: const TrialConfig(
+          scenarioId: 'Libre',
+          clients: 1,
+          distanceM: 0,
+          count: 2,
+          warmup: 0,
+          payloadBytes: 1024,
+          intervalMs: 0,
+        ),
+      );
+      expect(results.length, 2);
+      expect(results.every((m) => m.success && m.bytesReceived == 1024), true);
+      expect(repo.measurementCount(session.id), 2);
+      final uploads = await network.runTrial(
+        base: base,
+        code: network.pairCode!,
+        session: session,
+        phase: phase,
+        config: const TrialConfig(
+          scenarioId: 'Libre',
+          clients: 1,
+          distanceM: 0,
+          count: 2,
+          warmup: 0,
+          payloadBytes: 1024,
+          direction: 'upload',
+          intervalMs: 0,
+        ),
+      );
+      expect(uploads.length, 2);
+      expect(
+        uploads.every(
+          (m) =>
+              m.success &&
+              m.bytesSent == 1024 &&
+              m.speedMbps != null &&
+              m.speedMbps! > 0,
+        ),
+        true,
+      );
+      expect(repo.measurementCount(session.id), 4);
+      await expectLater(
+        network.runTrial(
+          base: base,
+          code: network.pairCode!,
+          session: session,
+          phase: phase,
+          config: const TrialConfig(
+            scenarioId: 'E4',
+            clients: 4,
+            distanceM: 1,
+            count: 1,
+          ),
+        ),
+        throwsUnsupportedError,
+      );
+    },
+  );
+
+  test(
+    'two participant instances coordinate E4 and preserve provenance',
+    () async {
+      final serverRepo = LabRepository.inMemory();
+      final workerRepos = [LabRepository.inMemory(), LabRepository.inMemory()];
+      final server = NetworkLab(serverRepo);
+      final workers = workerRepos.map(NetworkLab.new).toList();
+      addTearDown(() async {
+        for (final worker in workers) {
+          await worker.stopParticipant();
+        }
+        await server.stopServer();
+        for (final repo in workerRepos) {
+          repo.dispose();
+        }
+        serverRepo.dispose();
+      });
+      final port = await server.startServer(port: 0);
+      final base = Uri.parse('http://127.0.0.1:$port');
+      for (final worker in workers) {
+        await worker.startParticipant(base, server.pairCode!);
+      }
+      for (var i = 0; i < 50 && server.readyWorkers < 2; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+      expect(server.readyWorkers, 2);
+      final session = serverRepo.createSession('Factorial');
+      final phase = serverRepo.createPhase(session.id, 'Fase multicliente');
+      final actual = await server.runCoordinatedTrial(
+        session: session,
+        phase: phase,
+        config: const TrialConfig(
+          scenarioId: 'E4',
+          clients: 2,
+          distanceM: 1,
+          count: 3,
+          warmup: 0,
+          intervalMs: 0,
+        ),
+      );
+      expect(actual, 6);
+      final samples = serverRepo.measurements(session.id);
+      expect(samples.every((m) => m.success && m.clients == 2), true);
+      expect(samples.map((m) => m.clientId).toSet().length, 2);
+      final local = workerRepos.first.sessions().first;
+      final jobId = RegExp(r'Ensayo coordinado ([^ ]+)')
+          .firstMatch(local.notes)!
+          .group(1)!;
+      workerRepos.first.queueResult(
+        base.toString(),
+        jsonEncode({
+          'job_id': jobId,
+          'client_id': workers.first.clientId,
+          'samples': [workerRepos.first.measurements(local.id).first.toJson()],
+        }),
+      );
+      for (var i = 0; i < 30 && workerRepos.first.pendingResultCount > 0; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+      expect(workerRepos.first.pendingResultCount, 0);
+      expect(serverRepo.measurementCount(session.id), 6);
+    },
+    timeout: const Timeout(Duration(seconds: 45)),
+  );
+}

@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="LANXIS: campana de Gauss en un matraz geométrico">
+  <defs>
+    <linearGradient id="field" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#102C48"/>
+      <stop offset="1" stop-color="#071626"/>
+    </linearGradient>
+    <linearGradient id="signal" x1="0" x2="1" y1="1" y2="0">
+      <stop offset="0" stop-color="#83D8C5"/>
+      <stop offset=".55" stop-color="#4AC7D6"/>
+      <stop offset="1" stop-color="#6987F0"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="124" fill="url(#field)"/>
+  <circle cx="256" cy="256" r="185" fill="none" stroke="#A7D9E7" stroke-opacity=".14" stroke-width="3"/>
+  <path d="M211 108h90M226 108v72l-99 164c-18 30 2 59 33 59h192c31 0 51-29 33-59l-99-164v-72" fill="none" stroke="#B9E6E9" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M150 360h212" stroke="#7CBCCA" stroke-width="5" stroke-opacity=".5"/>
+  <g fill="url(#signal)">
+    <rect x="164" y="324" width="12" height="30" rx="6" opacity=".48"/>
+    <rect x="187" y="296" width="12" height="58" rx="6" opacity=".58"/>
+    <rect x="210" y="257" width="12" height="97" rx="6" opacity=".72"/>
+    <rect x="233" y="226" width="12" height="128" rx="6" opacity=".85"/>
+    <rect x="256" y="216" width="12" height="138" rx="6"/>
+    <rect x="279" y="226" width="12" height="128" rx="6" opacity=".85"/>
+    <rect x="302" y="257" width="12" height="97" rx="6" opacity=".72"/>
+    <rect x="325" y="296" width="12" height="58" rx="6" opacity=".58"/>
+  </g>
+  <path d="M150 345c51-4 68-128 112-128s61 124 100 128" fill="none" stroke="url(#signal)" stroke-width="11" stroke-linecap="round"/>
+</svg>

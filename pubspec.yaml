@@ -1,0 +1,38 @@
+name: lanxis
+description: Laboratorio local de experimentación e inferencia de redes.
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.14.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  sqlite3: ^3.9.1
+  path_provider: ^2.1.6
+  file_selector: ^1.1.0
+  fl_chart: ^1.3.1
+  shared_preferences: ^2.5.4
+  url_launcher: ^6.3.2
+  crypto: ^3.0.6
+  uuid: ^4.5.2
+  material_ui: ^1.11.1
+  data: ^0.15.2
+  archive: ^4.7.1
+  pdf: ^3.13.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  fonts:
+    - family: Space Grotesk
+      fonts:
+        - asset: assets/fonts/SpaceGrotesk.ttf
+    - family: Manrope
+      fonts:
+        - asset: assets/fonts/Manrope.ttf

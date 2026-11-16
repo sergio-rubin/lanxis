@@ -1,0 +1,3 @@
+# Esquema de datos
+
+Las tablas principales se organizan por IDs de sesión, fase, prueba, ensayo, medición y evento. Cada medición conserva UTC, protocolo, `client_id` opcional, `bytes_received` y `bytes_sent` separados, latencia, jitter, throughput, estado HTTP y error. La configuración de carga y la dirección solicitadas se guardan en el JSON de la prueba. `app_settings` conserva la identidad del cliente y `result_outbox` conserva lotes pendientes de confirmación. El CSV académico `datos_hotspot.csv` incluye `id_escenario`, `clientes`, `distancia_m`, `rssi_dbm`, `latencia_ms`, `jitter_ms`, `velocidad_mbps`, `exito_sla`, `calidad_red` y `tipo_anomalia`; el CSV enriquecido agrega bytes enviados y recibidos. Los valores no disponibles quedan vacíos, nunca se inventan.
