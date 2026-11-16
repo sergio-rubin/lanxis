@@ -14,6 +14,7 @@ import '../platform/hotspot_adapter.dart';
 import '../science/descriptive.dart';
 import '../science/inference.dart';
 import '../science/modeling.dart';
+import 'distribution_explorer.dart';
 import 'science_charts.dart';
 import 'visuals.dart';
 
@@ -2106,6 +2107,8 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                 const SizedBox(height: 16),
                 _InferencePanel(items: items, valid: valid),
               ],
+              const SizedBox(height: 16),
+              const DistributionExplorer(),
             ],
           ),
         ),

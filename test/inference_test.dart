@@ -12,6 +12,23 @@ void main() {
     expect(ProbabilityEngine.geometricAttemptsMean(0), double.infinity);
   });
 
+  test(
+    'large discrete parameters remain finite without factorial overflow',
+    () {
+      expect(
+        ProbabilityEngine.binomialPmf(1000, 500, .5),
+        closeTo(.0252250181783608, 1e-12),
+      );
+      expect(
+        ProbabilityEngine.poissonPmf(200, 200),
+        closeTo(.028197727685, 1e-10),
+      );
+      expect(ProbabilityEngine.binomialPmf(0, 0, 0), 1);
+      expect(ProbabilityEngine.binomialPmf(20, 20, 1), 1);
+      expect(ProbabilityEngine.poissonPmf(0, 0), 1);
+    },
+  );
+
   test('normal, t, exponential and chi-square probabilities', () {
     expect(
       ProbabilityEngine.normalArea(-1, 1, 0, 1),
@@ -40,9 +57,23 @@ void main() {
     expect(welch.degreesOfFreedom, greaterThan(0));
   });
 
-  test('proportion test records invalid normal approximation', () {
+  test('small proportion sample uses exact binomial tail', () {
     final result = InferenceEngine.slowProportionGreater(1, 10);
+    expect(result.method, 'Binomial exacta unilateral');
+    expect(result.pValue, closeTo(.6513215599, 1e-9));
+    expect(result.rejectNull, false);
     expect(result.warning, isNotNull);
     expect(result.decision, isNotEmpty);
+    final stronger = InferenceEngine.slowProportionGreater(4, 10);
+    expect(stronger.pValue, closeTo(.0127951984, 1e-9));
+    expect(stronger.rejectNull, true);
+    final rareEvent = InferenceEngine.slowProportionGreater(
+      5,
+      1000,
+      reference: .001,
+    );
+    expect(rareEvent.method, 'Binomial exacta unilateral');
+    expect(rareEvent.pValue, inInclusiveRange(.003, .004));
+    expect(rareEvent.rejectNull, true);
   });
 }

@@ -1,6 +1,7 @@
 import 'dart:math';
 
 import 'package:data/stats.dart' as dist;
+import 'package:data/special.dart' as special;
 
 import '../core/models.dart';
 import 'descriptive.dart';
@@ -120,10 +121,18 @@ class ProbabilityEngine {
   }
 
   static double binomialPmf(int n, int k, double p) {
-    if (n < 0 || k < 0 || k > n || p < 0 || p > 1) {
+    if (n < 0 || k < 0 || k > n || !p.isFinite || p < 0 || p > 1) {
       throw ArgumentError('Parámetros binomiales inválidos');
     }
-    return dist.BinomialDistribution(n, p).probability(k);
+    if (p == 0) return k == 0 ? 1 : 0;
+    if (p == 1) return k == n ? 1 : 0;
+    return exp(
+      special.gammaLn(n + 1) -
+          special.gammaLn(k + 1) -
+          special.gammaLn(n - k + 1) +
+          k * log(p) +
+          (n - k) * log(1 - p),
+    );
   }
 
   static double geometricAttemptsMean(double p) {
@@ -145,11 +154,11 @@ class ProbabilityEngine {
   }
 
   static double poissonPmf(int k, double lambda) {
-    if (k < 0 || lambda < 0) {
+    if (k < 0 || !lambda.isFinite || lambda < 0) {
       throw ArgumentError('Parámetros Poisson inválidos');
     }
     if (lambda == 0) return k == 0 ? 1 : 0;
-    return dist.PoissonDistribution(lambda).probability(k);
+    return exp(k * log(lambda) - lambda - special.gammaLn(k + 1));
   }
 
   static double normalArea(double a, double b, double mean, double sd) {
@@ -311,8 +320,41 @@ class InferenceEngine {
     double alpha = .05,
   }) {
     _checkAlpha(alpha);
-    if (n < 1 || slow < 0 || slow > n || reference <= 0 || reference >= 1) {
+    if (n < 1 ||
+        slow < 0 ||
+        slow > n ||
+        !reference.isFinite ||
+        reference <= 0 ||
+        reference >= 1) {
       throw ArgumentError('Datos de proporción inválidos');
+    }
+    if (n * reference < 5 || n * (1 - reference) < 5) {
+      final upperTails = List<double>.filled(n + 2, 0);
+      for (var k = n; k >= 0; k--) {
+        upperTails[k] =
+            (upperTails[k + 1] + ProbabilityEngine.binomialPmf(n, k, reference))
+                .clamp(0.0, 1.0);
+      }
+
+      var firstRejected = n + 1;
+      for (var k = 0; k <= n; k++) {
+        if (upperTails[k] <= alpha) {
+          firstRejected = k;
+          break;
+        }
+      }
+      return HypothesisResult(
+        nullHypothesis: 'p = $reference',
+        alternativeHypothesis: 'p > $reference',
+        method: 'Binomial exacta unilateral',
+        assumptions: 'Ensayos Bernoulli independientes con probabilidad constante bajo H0.',
+        alpha: alpha,
+        statistic: slow.toDouble(),
+        criticalValue: (firstRejected - 1).toDouble(),
+        pValue: upperTails[slow],
+        sampleSize: n,
+        warning: 'Muestra pequeña: se usa la distribución binomial exacta en vez de aproximación normal.',
+      );
     }
     final statistic =
         (slow / n - reference) / sqrt(reference * (1 - reference) / n);
@@ -334,6 +376,8 @@ class InferenceEngine {
   }
 
   static void _checkAlpha(double alpha) {
-    if (alpha <= 0 || alpha >= 1) throw ArgumentError.value(alpha);
+    if (!alpha.isFinite || alpha <= 0 || alpha >= 1) {
+      throw ArgumentError.value(alpha);
+    }
   }
 }

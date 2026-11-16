@@ -83,6 +83,7 @@ jobs:
           cache: true
       - run: flutter config --enable-windows-desktop
       - run: flutter pub get
+      - run: flutter test test/repository_network_test.dart test/export_test.dart test/science_test.dart test/inference_test.dart test/modeling_test.dart
       - run: flutter build windows --release
       - shell: pwsh
         run: |
