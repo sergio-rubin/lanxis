@@ -23,9 +23,14 @@ class LinuxBleScanner {
     final cached = <DBusObjectPath, Map<String, DBusValue>>{};
     final completed = Completer<void>();
 
-    void record(DBusObjectPath path, Map<String, DBusValue> update) {
+    void record(
+      DBusObjectPath path,
+      Map<String, DBusValue> update, {
+      bool capture = true,
+    }) {
       final properties = cached.putIfAbsent(path, () => {});
       properties.addAll(update);
+      if (!capture) return;
       if (!_matchesToken(properties['ServiceData'], expected)) return;
       final rssi =
           update['RSSI'] ??
@@ -55,6 +60,12 @@ class LinuxBleScanner {
         throw StateError('BlueZ no encontró un adaptador Bluetooth.');
       }
       adapter = DBusRemoteObject(bus, name: 'org.bluez', path: adapterPath);
+      // Existing BlueZ objects provide token context, never a fresh RSSI
+      // sample: their values can predate this scan.
+      for (final entry in objects.entries) {
+        final properties = entry.value['org.bluez.Device1'];
+        if (properties != null) record(entry.key, properties, capture: false);
+      }
       subscription = manager.signals.listen((signal) {
         if (signal is DBusObjectManagerInterfacesAddedSignal) {
           final properties =
@@ -81,12 +92,6 @@ class LinuxBleScanner {
         replySignature: DBusSignature(''),
       );
       discovering = true;
-      // Include a previously discovered matching device only after discovery
-      // starts; a new random token prevents accepting a former trial's beacon.
-      for (final entry in objects.entries) {
-        final properties = entry.value['org.bluez.Device1'];
-        if (properties != null) record(entry.key, properties);
-      }
       await completed.future.timeout(
         const Duration(seconds: 8),
         onTimeout: () {},
