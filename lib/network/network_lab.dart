@@ -49,10 +49,8 @@ class _CoordinatedJob {
 }
 
 class NetworkLab {
-  NetworkLab(
-    this.repository, {
-    this.distanceProbe = const DistanceProbe(),
-  }) : clientId = repository.clientIdentity;
+  NetworkLab(this.repository, {this.distanceProbe = const DistanceProbe()})
+    : clientId = repository.clientIdentity;
   final LabRepository repository;
   final DistanceProbe distanceProbe;
   static const protocolVersion = 1;
