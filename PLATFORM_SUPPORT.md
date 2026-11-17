@@ -5,6 +5,7 @@
 | Flutter nativo | Objetivo | Objetivo | Objetivo |
 | Servidor/cliente HTTP, transferencia TCP y eco UDP por LAN existente | Implementación compartida | Implementación compartida | Implementación compartida |
 | SQLite local | Implementación compartida | Implementación compartida | Implementación compartida |
+| Descubrimiento mDNS/DNS-SD | Bonsoir sobre NSD; APK instalado y anuncio del Xiaomi resuelto físicamente desde Linux con `proto=1` | Bonsoir sobre APIs Windows; compilación y prueba física pendientes | Bonsoir sobre Avahi; bundle compilado y descubrimiento real del anuncio Android probado; requiere servicio Avahi |
 | Distancia automática al punto de acceso | Wi-Fi RTT mediante API oficial cuando el equipo, el punto de acceso y los permisos lo permiten; con incertidumbre y procedencia | Sin medición automática implementada | Sin medición automática implementada |
 | Distancia estimada entre pares por BLE | Baliza y escáner LANXIS; prueba física Android↔Linux; requiere Bluetooth y permisos | Baliza y escáner BLE pendientes | Baliza y escáner BlueZ mediante D-Bus; ensayo Linux→Android 3/3 con distancia BLE; lecturas escasas se etiquetan |
 | Hotspot controlado por la app | Adaptador Kotlin `startLocalOnlyHotspot`, sujeto a permisos y fabricante; compilado, pendiente prueba física | Control automático no implementado; «Ajustes Wi-Fi» abre la página oficial de Windows para configurar una red existente | Adaptador `nmcli`/NetworkManager con detección AP, PolicyKit y perfil temporal; compilado, pendiente prueba con hardware |

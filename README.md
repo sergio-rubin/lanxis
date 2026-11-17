@@ -27,7 +27,7 @@ En **Análisis** se puede filtrar por sesión, fase, prueba y ensayo, y explorar
 
 Para revisar una exportación con NumPy, SciPy, Pandas y Matplotlib sin modificar la app, consulte [REPRODUCIBILITY.md](REPRODUCIBILITY.md) y la utilidad opcional `tools/verify_export.py`.
 
-Para una prueba entre dispositivos: en el equipo servidor, abre **Red local → Ofrecer servidor** y comparte la dirección y el código; en el cliente, usa **Conectar servidor → Conectar y comprobar**. Después crea o selecciona una sesión y una fase, revisa la vista previa del escenario y pulsa **Iniciar ensayo**. Para E4–E6, los clientes deben activar **Participar en ensayo de otro dispositivo** y el servidor muestra cuántos están listos.
+Para una prueba entre dispositivos: en el equipo servidor, abre **Red local → Ofrecer servidor** y comparte la dirección y el código; en el cliente, pulsa **Buscar servidores LANXIS** (mDNS, UDP y sondeo local), selecciona el servidor y usa **Conectar y comprobar**. Si la red bloquea el descubrimiento, introduce la URL manualmente. Después crea o selecciona una sesión y una fase, revisa la vista previa del escenario y pulsa **Iniciar ensayo**. Para E4–E6, los clientes deben activar **Participar en ensayo de otro dispositivo** y el servidor muestra cuántos están listos.
 
 ## Licencia
 

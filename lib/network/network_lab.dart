@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:bonsoir/bonsoir.dart';
 import 'package:uuid/uuid.dart';
 
 import '../core/models.dart';
@@ -49,13 +50,18 @@ class NetworkLab {
   final LabRepository repository;
   static const protocolVersion = 1;
   static const maxDownloadBytes = 100 * 1024 * 1024;
+  static const mdnsServiceType = '_lanxis._tcp';
   static const _uuid = Uuid();
   HttpServer? _server;
   TcpTransferServer? _tcpTransfer;
   UdpEchoServer? _udpEcho;
   RawDatagramSocket? _discoverySocket;
+  BonsoirBroadcast? _mdnsBroadcast;
+  Future<void>? _mdnsStartTask;
   BleBeacon? _bleBeacon;
   String? bleBeaconError;
+  String? mdnsError;
+  bool get mdnsActive => _mdnsBroadcast != null;
   bool get bleBeaconActive => _bleBeacon != null;
   StreamSubscription<RawSocketEvent>? _discoverySubscription;
   int _activeTransfers = 0;
@@ -143,10 +149,49 @@ class NetworkLab {
       }
     }
     unawaited(server.forEach(_handleRequest));
+    _mdnsStartTask = _startMdns(server);
     return server.port;
   }
 
+  Future<void> _startMdns(HttpServer server) async {
+    BonsoirBroadcast? mdns;
+    try {
+      mdns = BonsoirBroadcast(
+        printLogs: false,
+        service: BonsoirService(
+          name: 'LANXIS-${clientId.substring(0, 8)}',
+          type: mdnsServiceType,
+          port: server.port,
+          attributes: {'proto': '$protocolVersion'},
+        ),
+      );
+      await mdns.initialize().timeout(const Duration(seconds: 3));
+      await mdns.start().timeout(const Duration(seconds: 3));
+      if (!identical(_server, server)) {
+        await mdns.stop().timeout(const Duration(seconds: 2));
+        return;
+      }
+      _mdnsBroadcast = mdns;
+      mdnsError = null;
+    } catch (error) {
+      mdnsError = '$error';
+      try {
+        await mdns?.stop().timeout(const Duration(seconds: 1));
+      } catch (_) {
+        // Other discovery methods still work without mDNS.
+      }
+    }
+  }
+
   Future<void> stopServer() async {
+    await _mdnsStartTask;
+    _mdnsStartTask = null;
+    try {
+      await _mdnsBroadcast?.stop().timeout(const Duration(seconds: 2));
+    } catch (_) {
+      // The native mDNS service may already have stopped.
+    }
+    _mdnsBroadcast = null;
     await _bleBeacon?.close();
     _bleBeacon = null;
     await _udpEcho?.close();
@@ -174,6 +219,9 @@ class NetworkLab {
     final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
     socket.broadcastEnabled = true;
     final found = <String, DiscoveredServer>{};
+    final mdnsTask = target == null
+        ? _discoverMdns(found, duration)
+        : Future<void>.value();
     final subscription = socket.listen((event) {
       if (event != RawSocketEvent.read) return;
       Datagram? packet;
@@ -223,6 +271,7 @@ class NetworkLab {
         }
       }
       await Future<void>.delayed(duration);
+      await mdnsTask;
       if (found.isEmpty && (target == null || fallbackAddresses != null)) {
         final candidates =
             fallbackAddresses ?? _localScanAddresses(localInterfaces);
@@ -234,6 +283,56 @@ class NetworkLab {
     } finally {
       await subscription.cancel();
       socket.close();
+    }
+  }
+
+  Future<void> _discoverMdns(
+    Map<String, DiscoveredServer> found,
+    Duration duration,
+  ) async {
+    BonsoirDiscovery? discovery;
+    StreamSubscription<BonsoirDiscoveryEvent>? events;
+    try {
+      discovery = BonsoirDiscovery(type: mdnsServiceType, printLogs: false);
+      await discovery.initialize().timeout(const Duration(seconds: 3));
+      events = discovery.eventStream?.listen((event) {
+        if (event is BonsoirDiscoveryServiceFoundEvent) {
+          unawaited(
+            event.service
+                .resolve(discovery!.serviceResolver)
+                .catchError((Object _) {}),
+          );
+        } else if (event is BonsoirDiscoveryServiceResolvedEvent ||
+            event is BonsoirDiscoveryServiceUpdatedEvent) {
+          final service = event.service;
+          if (service == null ||
+              service.attributes['proto'] != '$protocolVersion' ||
+              service.port < 1 ||
+              service.port > 65535) {
+            return;
+          }
+          for (final host in service.hostAddresses) {
+            final address = InternetAddress.tryParse(host);
+            if (address == null ||
+                address.type != InternetAddressType.IPv4 ||
+                address.isLoopback) {
+              continue;
+            }
+            found[address.address] = DiscoveredServer(address, service.port);
+          }
+        }
+      });
+      await discovery.start().timeout(const Duration(seconds: 3));
+      await Future<void>.delayed(duration);
+    } catch (_) {
+      // UDP discovery, health scan and manual URL remain available.
+    } finally {
+      await events?.cancel();
+      try {
+        await discovery?.stop().timeout(const Duration(seconds: 2));
+      } catch (_) {
+        // Native discovery may have stopped before cancellation.
+      }
     }
   }
 
@@ -343,6 +442,7 @@ class NetworkLab {
               if (_tcpTransfer != null) 'tcp-transfer',
               if (_udpEcho != null) 'udp-echo',
               if (_discoverySocket != null) 'udp-discovery',
+              if (_mdnsBroadcast != null) 'mdns-discovery',
               if (_bleBeacon != null) 'ble-distance-estimate',
             ],
             if (_bleBeacon != null) 'distance_beacon_token': _bleBeacon!.token,
