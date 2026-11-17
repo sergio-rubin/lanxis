@@ -80,6 +80,8 @@ class MainActivity : FlutterFragmentActivity() {
     private val distancePermissionRequest = 9128
     private val blePermissionRequest = 9129
     private val beaconPermissionRequest = 9130
+    private val notificationPermissionRequest = 9131
+    private var pendingNotificationPermission: MethodChannel.Result? = null
     private val beaconUuid = ParcelUuid.fromString("a7f58c20-ff3b-4f92-b11a-17f855bc6049")
     private val wifi: WifiManager by lazy {
         applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
@@ -87,24 +89,36 @@ class MainActivity : FlutterFragmentActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "mx.lanxis/participant")
+        ParticipantControl.installChannel(applicationContext, flutterEngine)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "mx.lanxis/notifications")
             .setMethodCallHandler { call, result ->
-                try {
-                    when (call.method) {
-                        "start" -> {
-                            val intent = Intent(this, ParticipantForegroundService::class.java)
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent)
-                            else startService(intent)
-                            result.success(null)
-                        }
-                        "stop" -> {
-                            stopService(Intent(this, ParticipantForegroundService::class.java))
-                            result.success(null)
-                        }
-                        else -> result.notImplemented()
+                if (call.method != "request") {
+                    result.notImplemented()
+                } else if (pendingNotificationPermission != null) {
+                    result.error("busy", "Ya hay una solicitud de notificaciones en curso.", null)
+                } else {
+                    val missing = mutableListOf<String>()
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                        checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                        missing.add(Manifest.permission.POST_NOTIFICATIONS)
                     }
-                } catch (error: Exception) {
-                    result.error("participant_service", error.message, null)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                        packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE)) {
+                        for (permission in arrayOf(
+                            Manifest.permission.BLUETOOTH_ADVERTISE,
+                            Manifest.permission.BLUETOOTH_CONNECT
+                        )) {
+                            if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) {
+                                missing.add(permission)
+                            }
+                        }
+                    }
+                    if (missing.isEmpty()) {
+                        result.success(true)
+                    } else {
+                        pendingNotificationPermission = result
+                        requestPermissions(missing.toTypedArray(), notificationPermissionRequest)
+                    }
                 }
             }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "mx.lanxis/hotspot")
@@ -539,6 +553,13 @@ class MainActivity : FlutterFragmentActivity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == notificationPermissionRequest) {
+            pendingNotificationPermission?.success(
+                Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED)
+            pendingNotificationPermission = null
+            return
+        }
         if (requestCode == beaconPermissionRequest) {
             val pending = pendingBeaconStart ?: return
             pendingBeaconStart = null

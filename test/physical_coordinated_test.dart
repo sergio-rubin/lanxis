@@ -14,6 +14,10 @@ void main() {
     'LANXIS_TRIGGER_FILE',
     defaultValue: '/tmp/lanxis-trigger-coordinated',
   );
+  const outputFile = String.fromEnvironment(
+    'LANXIS_PHYSICAL_OUTPUT',
+    defaultValue: 'dist/physical-android-client.json',
+  );
   test(
     'server initiates E1 while Android participates',
     () async {
@@ -78,7 +82,7 @@ void main() {
         stdout.writeln('Cliente: ${samples.firstOrNull?.clientId}');
         expect(actual, 5);
         expect(samples.every((m) => m.success && m.clientId != null), true);
-        final output = File('dist/physical-android-client-4017.json');
+        final output = File(outputFile);
         output.parent.createSync(recursive: true);
         output.writeAsStringSync(ExportService(repo).json(session.id));
         stdout.writeln('Exportación local: ${output.path}');

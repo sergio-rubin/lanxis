@@ -58,6 +58,7 @@ class NetworkLab {
   static const mdnsServiceType = '_lanxis._tcp';
   static const _uuid = Uuid();
   static const _participantService = MethodChannel('mx.lanxis/participant');
+  static const _notifications = MethodChannel('mx.lanxis/notifications');
   HttpServer? _server;
   TcpTransferServer? _tcpTransfer;
   UdpEchoServer? _udpEcho;
@@ -81,6 +82,8 @@ class NetworkLab {
   _CoordinatedJob? _activeJob;
   final Map<String, _CoordinatedJob> _recentJobs = {};
   bool _participating = false;
+  Uri? participantBase;
+  String? participantCode;
   Future<void>? _participantTask;
   String? lastParticipantError;
   String? lastDistanceReason;
@@ -781,6 +784,46 @@ class NetworkLab {
 
   Future<void> startParticipant(Uri base, String code) async {
     if (_participating) return;
+    if (Platform.isAndroid) {
+      final allowed = await _notifications.invokeMethod<bool>('request');
+      if (allowed != true) {
+        throw StateError(
+          'Permite las notificaciones para mantener visible la conexión en segundo plano.',
+        );
+      }
+    }
+    if (!Platform.isAndroid) {
+      try {
+        _participantBeacon = await BleBeacon.start();
+        participantBeaconError = null;
+      } catch (error) {
+        participantBeaconError = '$error';
+      }
+    }
+    try {
+      await register(base, code);
+      if (Platform.isAndroid) {
+        await _participantService.invokeMethod<void>('start', {
+          'base': base.toString(),
+          'code': code,
+        });
+      }
+    } catch (_) {
+      await _participantBeacon?.close();
+      _participantBeacon = null;
+      rethrow;
+    }
+    lastParticipantError = null;
+    participantBase = base;
+    participantCode = code;
+    _participating = true;
+    if (!Platform.isAndroid) {
+      _participantTask = _participantLoop(base, code);
+    }
+  }
+
+  /// Runs only in the Flutter engine owned by Android's foreground service.
+  Future<void> runParticipantWorker(Uri base, String code) async {
     try {
       _participantBeacon = await BleBeacon.start();
       participantBeaconError = null;
@@ -789,17 +832,33 @@ class NetworkLab {
     }
     try {
       await register(base, code);
-      if (Platform.isAndroid) {
-        await _participantService.invokeMethod<void>('start');
-      }
-    } catch (_) {
-      await _participantBeacon?.close();
-      _participantBeacon = null;
-      rethrow;
+    } catch (error) {
+      lastParticipantError = '$error';
     }
-    lastParticipantError = null;
     _participating = true;
-    _participantTask = _participantLoop(base, code);
+    participantBase = base;
+    participantCode = code;
+    await _participantLoop(base, code);
+  }
+
+  /// Restores a user-started Android foreground session after process reclaim.
+  Future<void> restoreParticipant() async {
+    if (!Platform.isAndroid || _participating) return;
+    final state = await _participantService.invokeMapMethod<String, String>(
+      'state',
+    );
+    if (state == null) return;
+    final base = Uri.tryParse(state['base'] ?? '');
+    final code = state['code'] ?? '';
+    if (base == null ||
+        base.scheme != 'http' ||
+        base.host.isEmpty ||
+        !RegExp(r'^\d{6}$').hasMatch(code)) {
+      return;
+    }
+    participantBase = base;
+    participantCode = code;
+    _participating = true;
   }
 
   Future<void> stopParticipant() async {
@@ -808,6 +867,8 @@ class NetworkLab {
     _participantTask = null;
     await _participantBeacon?.close();
     _participantBeacon = null;
+    participantBase = null;
+    participantCode = null;
     if (Platform.isAndroid) {
       await _participantService.invokeMethod<void>('stop');
     }

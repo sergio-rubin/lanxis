@@ -1,7 +1,7 @@
 name: lanxis
 description: Laboratorio local de experimentación e inferencia de redes.
 publish_to: none
-version: 0.1.0+4017
+version: 0.1.0+4021
 
 environment:
   sdk: ^3.14.0

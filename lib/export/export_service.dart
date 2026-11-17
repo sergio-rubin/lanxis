@@ -38,6 +38,8 @@ class ExportScope {
 class ExportService {
   const ExportService(this.repository);
   final LabRepository repository;
+  static const appVersion = '0.1.0';
+  static const protocolVersion = 1;
 
   List<Measurement> _items(
     String sessionId,
@@ -99,12 +101,20 @@ class ExportService {
   }) {
     final report = AnalysisReport(_items(sessionId, scope));
     final rows = [report.general, ...report.individual.values];
+    final exportedUtc = DateTime.now().toUtc().toIso8601String();
     final buffer = StringBuffer(
-      'alcance,cliente_id,n_total,n_valid,n_failed,n_without_valid_rtt,media_ms,mediana_ms,p95_ms,sla,distancia_mediana_m,incertidumbre_max_m,interpretacion\r\n',
+      'session_id,phase_id,test_id,trial_id,lanxis_version,protocolo_version,exported_utc,alcance,cliente_id,n_total,n_valid,n_failed,n_without_valid_rtt,media_ms,mediana_ms,p95_ms,sla,distancia_mediana_m,incertidumbre_max_m,interpretacion\r\n',
     );
     for (final (index, row) in rows.indexed) {
       buffer.writeln(
         [
+          sessionId,
+          scope.phaseId,
+          scope.testId,
+          scope.trialId,
+          appVersion,
+          protocolVersion,
+          exportedUtc,
           index == 0 ? 'general' : 'individual',
           index == 0 ? '' : row.label,
           row.total,
@@ -165,7 +175,8 @@ class ExportService {
     return const JsonEncoder.withIndent('  ').convert({
       'format': 'LANXIS research export',
       'format_version': 1,
-      'protocol_version': 1,
+      'app_version': appVersion,
+      'protocol_version': protocolVersion,
       'exported_utc': DateTime.now().toUtc().toIso8601String(),
       'scope': scope.toJson(),
       'session': {
@@ -201,11 +212,19 @@ class ExportService {
       'summary': _summary(sessionId, scope),
       'analysis': AnalysisReport(_items(sessionId, scope)).toJson(),
       'server_metrics': _serverMetrics(sessionId, scope),
+      'server_metrics_scope': 'whole_trial_all_clients',
+      'scope_notes': {
+        'measurements': 'Filtered by every requested scope field.',
+        'events':
+            'Trial context is retained; events are not filtered by client.',
+        'server_metrics': 'Whole selected trial; not attributed to one client.',
+      },
       'definitions': {
-        'latency_ms': 'Application HTTP RTT using local monotonic clock',
+        'latency_ms': 'Application RTT for the recorded protocol using a local monotonic clock',
         'jitter_ms': '|RTT_i - RTT_(i-1)| for consecutive valid observations',
         'exito_sla': '1 only if successful and latency < 50 ms',
         'warmup': 'Excluded from CSV and default analysis',
+        'distance_m': 'Recorded distance with source and uncertainty; BLE RSSI is an estimate, not a calibrated measurement',
       },
     });
   }
@@ -301,7 +320,7 @@ h1,h2{letter-spacing:-.04em}section{background:white;border-radius:18px;padding:
 table{border-collapse:collapse;width:100%}td,th{padding:.6rem;border-bottom:1px solid #d9e5eb;text-align:left}
 svg{width:100%;height:auto}.muted{color:#587481}</style></head><body>
 <h1>LANXIS · ${cell(session.name)}</h1>
-<p class="muted">Sesión ${cell(session.id)} · Exportado ${DateTime.now().toUtc().toIso8601String()} UTC</p>
+<p class="muted">LANXIS $appVersion · Protocolo $protocolVersion · Sesión ${cell(session.id)} · Exportado ${DateTime.now().toUtc().toIso8601String()} UTC</p>
 <p class="muted">Alcance: ${cell(scope.toJson().isEmpty ? 'Sesión completa' : scope.toJson())}</p>
 <section><h2>Metodología</h2><p>RTT de aplicación del protocolo registrado (HTTP, TCP o UDP) con reloj monotónico local. Calentamientos excluidos del análisis. Fallos incluidos en el denominador del SLA. Cuartiles tipo 7, varianza muestral n−1 y criterio SLA estricto de latencia &lt; 50 ms.</p></section>
 <section><h2>Resultados</h2><table><tbody>
@@ -311,7 +330,7 @@ ${summary.entries.map((e) => '<tr><th>${cell(e.key)}</th><td>${cell(e.value)}</t
 <section><h2>Análisis por cliente</h2><table><thead><tr><th>Cliente</th><th>n</th><th>RTT medio</th><th>P95</th><th>SLA</th><th>Distancia mediana</th></tr></thead><tbody>
 ${report.individual.entries.map((e) => '<tr><td>${cell(e.key)}</td><td>${e.value.total}</td><td>${cell(e.value.stats.mean)}</td><td>${cell(e.value.stats.p95)}</td><td>${cell(e.value.sla)}</td><td>${cell(e.value.medianDistanceM)}</td></tr>').join()}
 </tbody></table>${report.individual.entries.map((e) => '<h3>${cell(e.key)}</h3><p>${cell(e.value.interpretation)}</p>').join()}</section>
-<section><h2>Métricas del servidor</h2><p>Duración y carga útil contabilizadas por el servidor; memoria RSS al terminar. No incluyen cabeceras de transporte.</p><table><thead><tr><th>Ensayo</th><th>Estado</th><th>Duración ms</th><th>Muestras</th><th>Enviado B</th><th>Recibido B</th><th>RSS B</th></tr></thead><tbody>
+<section><h2>Métricas del servidor</h2><p>Duración y carga útil contabilizadas por el servidor; memoria RSS al terminar. No incluyen cabeceras de transporte. Corresponden al ensayo completo con todos sus clientes, incluso cuando se filtra el análisis individual.</p><table><thead><tr><th>Ensayo</th><th>Estado</th><th>Duración ms</th><th>Muestras</th><th>Enviado B</th><th>Recibido B</th><th>RSS B</th></tr></thead><tbody>
 ${serverMetrics.map((m) => '<tr><td>${cell(m['trial_id'])}</td><td>${cell(m['status'])}</td><td>${cell(m['server_elapsed_ms'])}</td><td>${cell(m['server_received_samples'])}</td><td>${cell(m['server_payload_sent_bytes'])}</td><td>${cell(m['server_payload_received_bytes'])}</td><td>${cell(m['server_rss_bytes_end'])}</td></tr>').join()}
 </tbody></table></section>
 <section><h2>Distribución de latencia</h2><svg viewBox="0 0 700 240" role="img" aria-label="Histograma de latencias">
@@ -353,8 +372,11 @@ ${[for (var i = 0; i < bins.length; i++) '<rect x="${45 + i * 90}" y="${200 - bi
     final manifest = jsonEncode({
       'format': 'LANXIS research bundle',
       'version': 1,
+      'app_version': appVersion,
+      'protocol_version': protocolVersion,
       'session_id': sessionId,
       'scope': scope.toJson(),
+      'server_metrics_scope': 'whole_trial_all_clients',
       'created_utc': DateTime.now().toUtc().toIso8601String(),
       'files': {
         for (final entry in files.entries)
@@ -467,6 +489,12 @@ ${[for (var i = 0; i < bins.length; i++) '<rect x="${45 + i * 90}" y="${200 - bi
       ],
       'AnalisisClientes': [
         [
+          'session_id',
+          'phase_id',
+          'test_id',
+          'trial_id',
+          'lanxis_version',
+          'protocolo_version',
           'alcance',
           'cliente_id',
           'n_total',
@@ -486,6 +514,12 @@ ${[for (var i = 0; i < bins.length; i++) '<rect x="${45 + i * 90}" y="${200 - bi
           ...report.individual.values,
         ].indexed)
           [
+            sessionId,
+            scope.phaseId,
+            scope.testId,
+            scope.trialId,
+            appVersion,
+            protocolVersion,
             index == 0 ? 'general' : 'individual',
             index == 0 ? '' : row.label,
             row.total,
@@ -500,6 +534,18 @@ ${[for (var i = 0; i < bins.length; i++) '<rect x="${45 + i * 90}" y="${200 - bi
             row.maxUncertaintyM,
             row.interpretation,
           ],
+      ],
+      'Metadatos': [
+        ['campo', 'valor'],
+        ['session_id', sessionId],
+        ['lanxis_version', appVersion],
+        ['protocolo_version', protocolVersion],
+        ['exported_utc', DateTime.now().toUtc().toIso8601String()],
+        ['scope_json', jsonEncode(scope.toJson())],
+        ['server_metrics_scope', 'whole_trial_all_clients'],
+        ['latency_unit', 'ms'],
+        ['distance_unit', 'm'],
+        ['warmup_policy', 'excluded_from_default_analysis'],
       ],
     };
     final archive = Archive();
@@ -639,7 +685,7 @@ ${[
           pw.SizedBox(height: 8),
           pw.Text(session.name, style: const pw.TextStyle(fontSize: 19)),
           pw.Text(
-            'Sesión ${session.id} · ${DateTime.now().toUtc().toIso8601String()} UTC',
+            'LANXIS $appVersion · Protocolo $protocolVersion · Sesión ${session.id} · ${DateTime.now().toUtc().toIso8601String()} UTC',
           ),
           pw.Text(
             'Alcance: ${scope.toJson().isEmpty ? 'Sesión completa' : scope.toJson()}',
@@ -744,6 +790,10 @@ ${[
           pw.Text(
             'Duración del ensayo, muestras recibidas, carga útil enviada y recibida, y memoria RSS al finalizar. No incluyen cabeceras de transporte.',
           ),
+          if (scope.clientId != null)
+            pw.Text(
+              'Estas métricas corresponden al ensayo completo con todos sus clientes; no se atribuyen únicamente al cliente ${scope.clientId}.',
+            ),
           if (serverMetrics.isEmpty)
             pw.Text('No hay ensayos coordinados en esta selección.')
           else

@@ -159,6 +159,9 @@ void main() {
       }
       final service = ExportService(repo);
       final data = jsonDecode(service.json(session.id)) as Map;
+      expect(data['app_version'], '0.1.0');
+      expect(data['protocol_version'], 1);
+      expect(data['server_metrics_scope'], 'whole_trial_all_clients');
       final analysis = data['analysis'] as Map;
       expect((analysis['general'] as Map)['n_total'], 2);
       expect((analysis['individual'] as Map).length, 2);
@@ -183,9 +186,31 @@ void main() {
         ),
       ) as Map;
       expect((client['measurements'] as List).length, 1);
+      expect((client['scope'] as Map)['client_id'], 'cliente-a');
+      expect(
+        (client['scope_notes'] as Map)['server_metrics'],
+        contains('not attributed to one client'),
+      );
       expect(
         ((client['analysis'] as Map)['general'] as Map)['mean_latency_ms'],
         10,
+      );
+      final individualCsv = service.analysisCsv(
+        session.id,
+        scope: const ExportScope(clientId: 'cliente-a'),
+      );
+      expect(individualCsv, contains(session.id));
+      expect(individualCsv, contains('lanxis_version'));
+      expect(individualCsv, isNot(contains('cliente-b')));
+      final individualXlsx = ZipDecoder().decodeBytes(
+        service.xlsx(
+          session.id,
+          scope: const ExportScope(clientId: 'cliente-a'),
+        ),
+      );
+      expect(
+        utf8.decode(individualXlsx.findFile('xl/workbook.xml')!.content),
+        contains('Metadatos'),
       );
     },
   );

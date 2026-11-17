@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:material_ui/material_ui.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'data/lab_repository.dart';
@@ -11,6 +12,28 @@ import 'ui/visuals.dart';
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const LanxisApp());
+}
+
+/// The Android foreground service runs this isolate without a Flutter view.
+@pragma('vm:entry-point')
+Future<void> participantBackgroundMain() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  const channel = MethodChannel('mx.lanxis/participant_worker');
+  final state = await channel.invokeMapMethod<String, String>('state');
+  final base = Uri.tryParse(state?['base'] ?? '');
+  final code = state?['code'] ?? '';
+  if (base == null ||
+      base.scheme != 'http' ||
+      base.host.isEmpty ||
+      !RegExp(r'^\d{6}$').hasMatch(code)) {
+    return;
+  }
+  final repo = await LabRepository.open();
+  try {
+    await NetworkLab(repo).runParticipantWorker(base, code);
+  } finally {
+    repo.dispose();
+  }
 }
 
 class LanxisApp extends StatefulWidget {
@@ -39,13 +62,15 @@ class _LanxisAppState extends State<LanxisApp> {
       final prefs = await SharedPreferences.getInstance();
       final value = prefs.getString('theme');
       final repo = await LabRepository.open();
+      final restoredNetwork = NetworkLab(repo);
+      await restoredNetwork.restoreParticipant();
       if (!mounted) {
         repo.dispose();
         return;
       }
       setState(() {
         repository = repo;
-        network = NetworkLab(repo);
+        network = restoredNetwork;
         mode = value == 'light'
             ? ThemeMode.light
             : value == 'dark'

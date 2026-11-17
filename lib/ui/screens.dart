@@ -972,6 +972,11 @@ class _NetworkScreenState extends State<NetworkScreen>
   @override
   void initState() {
     super.initState();
+    if (widget.network.participantBase != null) {
+      address.text = widget.network.participantBase.toString();
+      code.text = widget.network.participantCode ?? '';
+      connected = true;
+    }
     address.addListener(_clearConnection);
     code.addListener(_clearConnection);
     statusTimer = Timer.periodic(const Duration(seconds: 2), (_) {
@@ -1517,7 +1522,7 @@ class _NetworkScreenState extends State<NetworkScreen>
                   ),
                   const SizedBox(height: 9),
                   const Text(
-                    'El servidor inicia los ensayos. Este dispositivo permanece conectado y envía sus mediciones automáticamente, incluso si visitas otra sección de la app.',
+                    'El servidor inicia los ensayos. Este dispositivo permanece conectado y envía sus mediciones automáticamente, incluso al cerrar LANXIS. Una notificación indica que la conexión sigue activa.',
                   ),
                   const SizedBox(height: 12),
                   Text('Servidor: ${address.text.trim()}'),
