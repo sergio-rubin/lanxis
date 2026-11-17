@@ -5,6 +5,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.wifi.WifiManager
+import android.net.wifi.rtt.RangingRequest
+import android.net.wifi.rtt.RangingResult
+import android.net.wifi.rtt.RangingResultCallback
+import android.net.wifi.rtt.WifiRttManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -17,7 +21,9 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
     private var reservation: WifiManager.LocalOnlyHotspotReservation? = null
     private var pendingStart: MethodChannel.Result? = null
+    private var pendingDistance: Pair<String, MethodChannel.Result>? = null
     private val permissionRequest = 9127
+    private val distancePermissionRequest = 9128
     private val wifi: WifiManager by lazy {
         applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
     }
@@ -26,6 +32,12 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "mx.lanxis/hotspot")
             .setMethodCallHandler { call, result -> handle(call, result) }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "mx.lanxis/distance")
+            .setMethodCallHandler { call, result ->
+                if (call.method == "measureToServer") {
+                    measureToServer(call.argument<String>("host") ?: "", result)
+                } else result.notImplemented()
+            }
     }
 
     private fun handle(call: MethodCall, result: MethodChannel.Result) {
@@ -118,12 +130,98 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun unavailable(result: MethodChannel.Result, reason: String) {
+        result.success(mapOf("reason" to reason))
+    }
+
+    private fun measureToServer(host: String, result: MethodChannel.Result) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P ||
+            !packageManager.hasSystemFeature(PackageManager.FEATURE_WIFI_RTT)) {
+            unavailable(result, "Este teléfono no admite Wi-Fi RTT.")
+            return
+        }
+        @Suppress("DEPRECATION")
+        val gateway = wifi.dhcpInfo?.gateway ?: 0
+        val gatewayIp = "${gateway and 255}.${gateway ushr 8 and 255}." +
+            "${gateway ushr 16 and 255}.${gateway ushr 24 and 255}"
+        if (gateway == 0 || host != gatewayIp) {
+            unavailable(result, "El servidor no es el punto de acceso Wi-Fi; medir el router no daría la distancia al servidor.")
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) !=
+            PackageManager.PERMISSION_GRANTED) {
+            if (pendingDistance != null) {
+                unavailable(result, "Ya hay una medición de distancia en curso.")
+                return
+            }
+            pendingDistance = Pair(host, result)
+            requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION),
+                distancePermissionRequest)
+            return
+        }
+        rangeAccessPoint(result)
+    }
+
+    private fun rangeAccessPoint(result: MethodChannel.Result) {
+        try {
+            val rtt = getSystemService(Context.WIFI_RTT_RANGING_SERVICE) as? WifiRttManager
+            if (rtt == null || !rtt.isAvailable) {
+                unavailable(result, "Wi-Fi RTT no está disponible; activa ubicación y Wi-Fi.")
+                return
+            }
+            @Suppress("DEPRECATION")
+            val bssid = wifi.connectionInfo?.bssid
+            val ap = wifi.scanResults.firstOrNull {
+                it.BSSID.equals(bssid, ignoreCase = true) && it.is80211mcResponder
+            }
+            if (ap == null) {
+                unavailable(result, "El punto de acceso conectado no anuncia Wi-Fi RTT (802.11mc).")
+                return
+            }
+            val request = RangingRequest.Builder().addAccessPoint(ap).build()
+            rtt.startRanging(request, mainExecutor, object : RangingResultCallback() {
+                override fun onRangingFailure(code: Int) {
+                    unavailable(result, "Wi-Fi RTT no pudo medir (código $code).")
+                }
+                override fun onRangingResults(results: MutableList<RangingResult>) {
+                    val sample = results.firstOrNull {
+                        it.status == RangingResult.STATUS_SUCCESS
+                    }
+                    if (sample == null) {
+                        unavailable(result, "El punto de acceso no devolvió una distancia válida.")
+                    } else {
+                        result.success(mapOf(
+                            "distance_m" to sample.distanceMm / 1000.0,
+                            "uncertainty_m" to sample.distanceStdDevMm / 1000.0,
+                            "source" to "wifi_rtt_ap"
+                        ))
+                    }
+                }
+            })
+        } catch (error: SecurityException) {
+            unavailable(result, "Sin permiso de ubicación precisa para Wi-Fi RTT.")
+        } catch (error: Exception) {
+            unavailable(result, error.message ?: "Wi-Fi RTT no disponible.")
+        }
+    }
+
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == distancePermissionRequest) {
+            val pending = pendingDistance ?: return
+            pendingDistance = null
+            if (grantResults.isNotEmpty() &&
+                grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                rangeAccessPoint(pending.second)
+            } else {
+                unavailable(pending.second, "Permiso de ubicación precisa denegado.")
+            }
+            return
+        }
         if (requestCode != permissionRequest) return
         val result = pendingStart ?: return
         pendingStart = null

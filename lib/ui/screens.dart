@@ -3,10 +3,12 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:fl_chart/fl_chart.dart';
+import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../core/models.dart';
+import '../core/scenario_planner.dart';
 import '../data/lab_repository.dart';
 import '../export/export_service.dart';
 import '../network/network_lab.dart';
@@ -37,6 +39,7 @@ class LabShell extends StatefulWidget {
 class _LabShellState extends State<LabShell> {
   int index = 0;
   int revision = 0;
+  final PageController pages = PageController();
   static const titles = ['Inicio', 'Red local', 'Análisis', 'Acerca de'];
   static const icons = [
     Icons.space_dashboard_rounded,
@@ -46,6 +49,26 @@ class _LabShellState extends State<LabShell> {
   ];
 
   void refresh() => setState(() => revision++);
+
+  void selectPage(int next) {
+    if (next == index) return;
+    setState(() => index = next);
+    if (MediaQuery.disableAnimationsOf(context)) {
+      pages.jumpToPage(next);
+    } else {
+      pages.animateToPage(
+        next,
+        duration: const Duration(milliseconds: 420),
+        curve: Curves.easeInOutCubic,
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    pages.dispose();
+    super.dispose();
+  }
 
   void openSession(LabSession item) {
     final reduced = MediaQuery.disableAnimationsOf(context);
@@ -78,7 +101,6 @@ class _LabShellState extends State<LabShell> {
   @override
   Widget build(BuildContext context) {
     final wide = MediaQuery.sizeOf(context).width >= 850;
-    final reduced = MediaQuery.disableAnimationsOf(context);
     final theme = Theme.of(context);
     final screens = [
       Dashboard(
@@ -107,6 +129,7 @@ class _LabShellState extends State<LabShell> {
                     child: SizedBox(
                       width: 234,
                       child: AcrylicPanel(
+                        blur: true,
                         padding: const EdgeInsets.all(16),
                         child: Column(
                           children: [
@@ -128,7 +151,7 @@ class _LabShellState extends State<LabShell> {
                                   label: titles[i],
                                   icon: icons[i],
                                   selected: i == index,
-                                  onTap: () => setState(() => index = i),
+                                  onTap: () => selectPage(i),
                                 ),
                               ),
                             const Spacer(),
@@ -190,25 +213,10 @@ class _LabShellState extends State<LabShell> {
                         ),
                       ),
                       Expanded(
-                        child: AnimatedSwitcher(
-                          duration: reduced
-                              ? Duration.zero
-                              : const Duration(milliseconds: 330),
-                          transitionBuilder: (child, animation) =>
-                              FadeTransition(
-                                opacity: animation,
-                                child: SlideTransition(
-                                  position: Tween(
-                                    begin: const Offset(.025, .02),
-                                    end: Offset.zero,
-                                  ).animate(animation),
-                                  child: child,
-                                ),
-                              ),
-                          child: KeyedSubtree(
-                            key: ValueKey(index),
-                            child: screens[index],
-                          ),
+                        child: PageView(
+                          controller: pages,
+                          onPageChanged: (next) => setState(() => index = next),
+                          children: screens,
                         ),
                       ),
                     ],
@@ -221,13 +229,12 @@ class _LabShellState extends State<LabShell> {
       ),
       bottomNavigationBar: wide
           ? null
-          : NavigationBar(
+          : GeometricNavBar(
+              controller: pages,
               selectedIndex: index,
-              onDestinationSelected: (i) => setState(() => index = i),
-              destinations: [
-                for (var i = 0; i < titles.length; i++)
-                  NavigationDestination(icon: Icon(icons[i]), label: titles[i]),
-              ],
+              labels: titles,
+              icons: icons,
+              onSelected: selectPage,
             ),
     );
   }
@@ -447,13 +454,16 @@ class Dashboard extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 38),
-              Row(
+              Wrap(
+                alignment: WrapAlignment.spaceBetween,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: 16,
+                runSpacing: 8,
                 children: [
                   Text(
                     'Investigaciones',
                     style: Theme.of(context).textTheme.headlineMedium,
                   ),
-                  const Spacer(),
                   Text('${sessions.length} en este dispositivo'),
                 ],
               ),
@@ -894,15 +904,18 @@ class NetworkScreen extends StatefulWidget {
   State<NetworkScreen> createState() => _NetworkScreenState();
 }
 
-class _NetworkScreenState extends State<NetworkScreen> {
+class _NetworkScreenState extends State<NetworkScreen>
+    with AutomaticKeepAliveClientMixin<NetworkScreen> {
+  @override
+  bool get wantKeepAlive => true;
   Timer? statusTimer;
   final HotspotAdapter hotspotAdapter = const PlatformHotspotAdapter();
   HotspotState? hotspot;
-  final address = TextEditingController(text: 'http://192.168.1.1:8040');
+  final address = TextEditingController();
   final code = TextEditingController();
   final count = TextEditingController(text: '100');
   final clients = TextEditingController(text: '1');
-  final distance = TextEditingController(text: '1');
+  final distance = TextEditingController();
   final payload = TextEditingController(text: '0');
   final interval = TextEditingController(text: '100');
   final timeout = TextEditingController(text: '5000');
@@ -912,6 +925,14 @@ class _NetworkScreenState extends State<NetworkScreen> {
   String scenario = 'E1';
   String direction = 'download';
   String protocol = 'http';
+  String environment = 'indoor';
+  String loadProfile = 'latency';
+  bool customAutoClients = false;
+  String preset = 'latency';
+  bool serverMode = false;
+  bool connected = false;
+  String? connectedName;
+  String? busyAction;
   bool busy = false;
   bool cancel = false;
   bool coordinating = false;
@@ -923,6 +944,8 @@ class _NetworkScreenState extends State<NetworkScreen> {
   @override
   void initState() {
     super.initState();
+    address.addListener(_clearConnection);
+    code.addListener(_clearConnection);
     statusTimer = Timer.periodic(const Duration(seconds: 2), (_) {
       if (mounted &&
           (widget.network.isServing || widget.network.isParticipating)) {
@@ -930,7 +953,15 @@ class _NetworkScreenState extends State<NetworkScreen> {
       }
     });
     _loadAddresses();
-    _loadHotspot();
+  }
+
+  void _clearConnection() {
+    if (connected && mounted) {
+      setState(() {
+        connected = false;
+        connectedName = null;
+      });
+    }
   }
 
   Future<void> _loadHotspot() async {
@@ -943,7 +974,10 @@ class _NetworkScreenState extends State<NetworkScreen> {
   }
 
   Future<void> _toggleHotspot() async {
-    setState(() => busy = true);
+    setState(() {
+      busy = true;
+      busyAction = 'hotspot';
+    });
     try {
       final value = hotspot?.active == true
           ? await hotspotAdapter.stop()
@@ -953,7 +987,12 @@ class _NetworkScreenState extends State<NetworkScreen> {
     } catch (e) {
       if (mounted) setState(() => feedback = 'Hotspot: $e');
     } finally {
-      if (mounted) setState(() => busy = false);
+      if (mounted) {
+        setState(() {
+          busy = false;
+          busyAction = null;
+        });
+      }
     }
   }
 
@@ -990,7 +1029,10 @@ class _NetworkScreenState extends State<NetworkScreen> {
   }
 
   Future<void> _toggleServer() async {
-    setState(() => busy = true);
+    setState(() {
+      busy = true;
+      busyAction = 'server';
+    });
     try {
       if (widget.network.isServing) {
         await widget.network.stopServer();
@@ -1008,12 +1050,21 @@ class _NetworkScreenState extends State<NetworkScreen> {
         setState(() => feedback = 'No se pudo cambiar el servidor: $e');
       }
     } finally {
-      if (mounted) setState(() => busy = false);
+      if (mounted) {
+        setState(() {
+          busy = false;
+          busyAction = null;
+        });
+      }
     }
   }
 
   Future<void> _toggleParticipant() async {
-    setState(() => busy = true);
+    setState(() {
+      busy = true;
+      busyAction = 'participant';
+      feedback = null;
+    });
     try {
       if (widget.network.isParticipating) {
         await widget.network.stopParticipant();
@@ -1031,36 +1082,117 @@ class _NetworkScreenState extends State<NetworkScreen> {
         );
       }
     } catch (e) {
-      if (mounted) setState(() => feedback = 'Participación: $e');
+      if (mounted) setState(() => feedback = 'No se pudo participar: $e');
     } finally {
-      if (mounted) setState(() => busy = false);
+      if (mounted) {
+        setState(() {
+          busy = false;
+          busyAction = null;
+        });
+      }
     }
   }
 
-  Future<void> _probe() async {
+  Future<void> _connect() async {
+    final uri = Uri.tryParse(address.text.trim());
+    if (uri == null ||
+        uri.scheme != 'http' ||
+        uri.host.isEmpty ||
+        !RegExp(r'^\d{6}$').hasMatch(code.text.trim())) {
+      setState(
+        () => feedback = 'Escribe una URL http://IP:puerto y el código de seis dígitos del servidor.',
+      );
+      return;
+    }
     setState(() {
       busy = true;
+      busyAction = 'connect';
       feedback = null;
     });
     try {
-      final response = await widget.network.probe(
-        Uri.parse(address.text.trim()),
-      );
+      final info = await widget.network.probe(uri);
+      await widget.network.register(uri, code.text.trim());
       if (!mounted) return;
-      setState(
-        () => feedback =
-            'Servidor ${response['name']} · protocolo ${response['version']} · capacidades ${response['capabilities']}',
-      );
+      setState(() {
+        connected = true;
+        connectedName = '${info['name'] ?? uri.host}';
+        feedback = 'Conectado a $connectedName. Ya puedes preparar un ensayo.';
+      });
     } catch (e) {
-      if (mounted) setState(() => feedback = 'Diagnóstico: $e');
+      if (mounted) {
+        setState(() {
+          connected = false;
+          feedback =
+              'No se pudo conectar. Comprueba la misma Wi-Fi, la URL y el código. Detalle: $e';
+        });
+      }
     } finally {
-      if (mounted) setState(() => busy = false);
+      if (mounted) {
+        setState(() {
+          busy = false;
+          busyAction = null;
+        });
+      }
     }
+  }
+
+  Future<void> _createSession() async {
+    final name = await _askName('Nueva sesión', 'Nombre del experimento');
+    if (name == null) return;
+    final session = widget.repository.createSession(name);
+    final phase = widget.repository.createPhase(session.id, 'Fase inicial');
+    if (!mounted) return;
+    setState(() {
+      sessionId = session.id;
+      phaseId = phase.id;
+      feedback = 'Sesión «$name» lista con su fase inicial.';
+    });
+    widget.onChanged();
+  }
+
+  Future<void> _createPhase() async {
+    if (sessionId == null) return;
+    final name = await _askName('Nueva fase', 'Nombre de la fase');
+    if (name == null) return;
+    final phase = widget.repository.createPhase(sessionId!, name);
+    if (!mounted) return;
+    setState(() => phaseId = phase.id);
+    widget.onChanged();
+  }
+
+  Future<String?> _askName(String title, String label) async {
+    var enteredName = '';
+    final value = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          autofocus: true,
+          textCapitalization: TextCapitalization.sentences,
+          decoration: InputDecoration(labelText: label),
+          onChanged: (value) => enteredName = value,
+          onSubmitted: (value) => Navigator.pop(dialogContext, value),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, enteredName),
+            child: const Text('Crear'),
+          ),
+        ],
+      ),
+    );
+    final trimmed = value?.trim();
+    return trimmed == null || trimmed.isEmpty ? null : trimmed;
   }
 
   Future<void> _discover() async {
     setState(() {
       busy = true;
+      busyAction = 'discover';
       feedback = null;
     });
     try {
@@ -1070,122 +1202,209 @@ class _NetworkScreenState extends State<NetworkScreen> {
         discovered = found;
         if (found.length == 1) address.text = found.first.uri.toString();
         feedback = found.isEmpty
-            ? 'No se encontró ningún servidor por UDP. Usa la IP manual si la red bloquea broadcasts.'
-            : '${found.length} servidor(es) LANXIS encontrados.';
+            ? 'No se encontraron servidores LANXIS. Si el servidor está activo, escribe su IP local manualmente; algunas redes bloquean la búsqueda.'
+            : '${found.length} servidor(es) LANXIS encontrados. Selecciona uno para usar su dirección.';
       });
     } catch (e) {
       if (mounted) setState(() => feedback = 'Descubrimiento: $e');
     } finally {
-      if (mounted) setState(() => busy = false);
+      if (mounted) {
+        setState(() {
+          busy = false;
+          busyAction = null;
+        });
+      }
     }
   }
 
+  bool get isReferenceScenario => RegExp(r'^E[1-6]$').hasMatch(scenario);
+
+  TrialConfig _currentConfig() {
+    final n = int.tryParse(count.text.trim());
+    if (n == null || n < 1 || n > 100000) {
+      throw const FormatException(
+        'Muestras: escribe un número entre 1 y 100 000.',
+      );
+    }
+    final distanceText = distance.text.trim();
+    final measured = distanceText.isEmpty
+        ? null
+        : double.tryParse(distanceText.replaceAll(',', '.'));
+    if (distanceText.isNotEmpty && (measured == null || measured < 0)) {
+      throw const FormatException(
+        'Distancia real: deja vacío o escribe metros válidos.',
+      );
+    }
+    if (isReferenceScenario) {
+      final plan = ScenarioPlanner.reference(
+        scenarioId: scenario,
+        environment: environment,
+        load: loadProfile,
+        readyClients: widget.network.readyWorkers,
+        count: n,
+      );
+      return measured == null
+          ? plan.config
+          : plan.config.withDistance(measured, 'manual', null);
+    }
+    final k = int.tryParse(clients.text.trim());
+    final bytes = int.tryParse(payload.text.trim());
+    final everyMs = int.tryParse(interval.text.trim());
+    final timeoutMs = int.tryParse(timeout.text.trim());
+    final warmupCount = int.tryParse(warmup.text.trim());
+    if (k == null ||
+        k < 1 ||
+        k > 32 ||
+        bytes == null ||
+        bytes < 0 ||
+        everyMs == null ||
+        everyMs < 0 ||
+        timeoutMs == null ||
+        timeoutMs < 100 ||
+        warmupCount == null ||
+        warmupCount < 0) {
+      throw const FormatException(
+        'Revisa clientes, carga, intervalo, espera y calentamiento.',
+      );
+    }
+    final actualClients = customAutoClients && widget.network.isServing
+        ? widget.network.readyWorkers.clamp(1, 32)
+        : k;
+    return TrialConfig(
+      scenarioId: scenario,
+      clients: actualClients,
+      count: n,
+      distanceM: measured,
+      distanceSource: measured == null ? 'unknown' : 'manual',
+      environment: environment,
+      payloadBytes: bytes,
+      intervalMs: everyMs,
+      timeoutMs: timeoutMs,
+      warmup: warmupCount,
+      protocol: protocol,
+      direction: direction,
+    );
+  }
+
+  Future<void> _saveTemplate() async {
+    TrialConfig config;
+    try {
+      config = _currentConfig();
+    } catch (error) {
+      setState(() => feedback = '$error');
+      return;
+    }
+    final name = await _askName('Guardar escenario', 'Nombre del escenario');
+    if (name == null) return;
+    final saved = widget.repository.saveScenarioTemplate(
+      name,
+      config,
+      autoClients: customAutoClients,
+    );
+    if (!mounted) return;
+    setState(() {
+      scenario = saved.id;
+      feedback = 'Escenario «$name» guardado. Puedes volver a usarlo después.';
+    });
+    widget.onChanged();
+  }
+
   Future<void> _run() async {
-    final sessions = widget.repository.sessions();
-    final selectedSession = sessions
-        .where((s) => s.id == sessionId)
+    TrialConfig config;
+    try {
+      config = _currentConfig();
+    } catch (error) {
+      setState(() => feedback = '$error');
+      return;
+    }
+    final coordinated =
+        config.clients > 1 || {'E4', 'E5', 'E6'}.contains(config.scenarioId);
+    if (coordinated && !widget.network.isServing) {
+      setState(
+        () => feedback = 'Inicia el servidor en el paso 1 para coordinar varios participantes.',
+      );
+      return;
+    }
+    if (!coordinated && !connected) {
+      setState(
+        () => feedback = 'Conecta primero con el servidor en el paso 1.',
+      );
+      return;
+    }
+    if (coordinated && widget.network.readyWorkers < config.clients) {
+      setState(
+        () => feedback =
+            'Faltan participantes listos: '
+            '${widget.network.readyWorkers}/${config.clients}.',
+      );
+      return;
+    }
+    final selectedSession = widget.repository
+        .sessions()
+        .where((item) => item.id == sessionId)
         .firstOrNull;
     final selectedPhase = selectedSession == null
         ? null
         : widget.repository
               .phases(selectedSession.id)
-              .where((p) => p.id == phaseId)
+              .where((item) => item.id == phaseId)
               .firstOrNull;
     if (selectedSession == null || selectedPhase == null) {
       setState(
-        () => feedback = 'Selecciona una sesión y una fase en el laboratorio.',
-      );
-      return;
-    }
-    final n = int.tryParse(count.text);
-    final k = int.tryParse(clients.text);
-    final d = double.tryParse(distance.text.replaceAll(',', '.'));
-    final bytes = int.tryParse(payload.text);
-    final everyMs = int.tryParse(interval.text);
-    final timeoutMs = int.tryParse(timeout.text);
-    final warmupCount = int.tryParse(warmup.text);
-    if (n == null ||
-        k == null ||
-        d == null ||
-        bytes == null ||
-        everyMs == null ||
-        timeoutMs == null ||
-        warmupCount == null ||
-        n < 1 ||
-        k < 1 ||
-        d < 0 ||
-        everyMs < 0 ||
-        timeoutMs < 100 ||
-        warmupCount < 0) {
-      setState(
-        () => feedback = 'Revisa cantidad, clientes, distancia y carga.',
+        () =>
+            feedback = 'Crea o selecciona una sesión y una fase en el paso 2.',
       );
       return;
     }
     setState(() {
       busy = true;
       cancel = false;
-      coordinating = k > 1 || {'E4', 'E5', 'E6'}.contains(scenario);
+      coordinating = coordinated;
       progress = 0;
       feedback = null;
     });
     try {
-      if (k > 1 || {'E4', 'E5', 'E6'}.contains(scenario)) {
+      if (coordinated) {
         final actual = await widget.network.runCoordinatedTrial(
           session: selectedSession,
           phase: selectedPhase,
-          config: TrialConfig(
-            scenarioId: scenario,
-            clients: k,
-            distanceM: d,
-            count: n,
-            payloadBytes: bytes,
-            protocol: protocol,
-            direction: direction,
-            intervalMs: everyMs,
-            timeoutMs: timeoutMs,
-            warmup: warmupCount,
-          ),
+          config: config,
         );
         if (!mounted) return;
         setState(
           () => feedback =
-              'Ensayo coordinado: $actual/${n * k} mediciones recibidas de $k dispositivos.',
+              'Ensayo coordinado: $actual/'
+              '${config.count * config.clients} mediciones recibidas de '
+              '${config.clients} dispositivos.',
         );
-        widget.onChanged();
-        return;
+      } else {
+        final results = await widget.network.runTrial(
+          base: Uri.parse(address.text.trim()),
+          code: code.text.trim(),
+          session: selectedSession,
+          phase: selectedPhase,
+          config: config,
+          cancelled: () => cancel,
+          onProgress: (done, _) {
+            if (mounted) setState(() => progress = done);
+          },
+        );
+        final successes = results.where((item) => item.success).length;
+        if (!mounted) return;
+        final distanceStatus =
+            results.isNotEmpty && results.first.distanceM != null
+            ? 'Distancia ${results.first.distanceM!.toStringAsFixed(1)} m '
+                  '(${results.first.distanceSource}).'
+            : 'Distancia no disponible; se guardó sin inventar un valor.';
+        setState(
+          () => feedback =
+              'Ensayo ${cancel ? 'cancelado' : 'terminado'}: '
+              '$successes/${results.length} respuestas. $distanceStatus',
+        );
       }
-      final results = await widget.network.runTrial(
-        base: Uri.parse(address.text.trim()),
-        code: code.text.trim(),
-        session: selectedSession,
-        phase: selectedPhase,
-        config: TrialConfig(
-          scenarioId: scenario,
-          clients: k,
-          distanceM: d,
-          count: n,
-          payloadBytes: bytes,
-          protocol: protocol,
-          direction: direction,
-          intervalMs: everyMs,
-          timeoutMs: timeoutMs,
-          warmup: warmupCount,
-        ),
-        cancelled: () => cancel,
-        onProgress: (done, _) {
-          if (mounted) setState(() => progress = done);
-        },
-      );
-      final successes = results.where((r) => r.success).length;
-      if (!mounted) return;
-      setState(
-        () => feedback =
-            'Ensayo ${cancel ? 'cancelado' : 'terminado'}: $successes/${results.length} solicitudes respondieron. Resultados guardados.',
-      );
       widget.onChanged();
-    } catch (e) {
-      if (mounted) setState(() => feedback = 'Ensayo interrumpido: $e');
+    } catch (error) {
+      if (mounted) setState(() => feedback = 'Ensayo interrumpido: $error');
     } finally {
       if (mounted) {
         setState(() {
@@ -1197,279 +1416,448 @@ class _NetworkScreenState extends State<NetworkScreen> {
   }
 
   void _setScenario(String value) {
-    setState(() => scenario = value);
-    final index = int.tryParse(value.replaceFirst('E', ''));
-    if (index != null && index >= 1 && index <= 6) {
-      clients.text = index <= 3 ? '1' : '4';
-      distance.text = [1, 6, 12][(index - 1) % 3].toString();
-    }
+    final saved = widget.repository
+        .scenarioTemplates()
+        .where((item) => item.id == value)
+        .firstOrNull;
+    setState(() {
+      scenario = value;
+      if (isReferenceScenario) {
+        count.text = '100';
+        distance.clear();
+      } else if (saved != null) {
+        final config = saved.config;
+        count.text = '${config.count}';
+        clients.text = '${config.clients}';
+        distance.text = config.distanceM?.toString() ?? '';
+        payload.text = '${config.payloadBytes}';
+        interval.text = '${config.intervalMs}';
+        timeout.text = '${config.timeoutMs}';
+        warmup.text = '${config.warmup}';
+        protocol = config.protocol;
+        direction = config.direction;
+        environment = config.environment;
+        customAutoClients = saved.autoClients;
+        preset = 'custom';
+      } else {
+        customAutoClients = false;
+      }
+    });
   }
+
+  void _applyPreset(String kind) {
+    setState(() {
+      preset = kind;
+      protocol = kind == 'tcp'
+          ? 'tcp'
+          : kind == 'udp'
+          ? 'udp'
+          : 'http';
+      direction = kind == 'upload' ? 'upload' : 'download';
+      payload.text = kind == 'latency'
+          ? '0'
+          : kind == 'udp'
+          ? '32'
+          : '65536';
+    });
+  }
+
+  String _presetDescription() => switch (preset) {
+    'latency' => 'Mide el tiempo de ida y vuelta de una petición HTTP pequeña.',
+    'download' => 'Mide la respuesta al descargar datos del servidor.',
+    'upload' => 'Mide el envío de datos hacia el servidor.',
+    'tcp' => 'Mide conexión y transferencia TCP directa.',
+    'udp' => 'Mide eco UDP con una carga pequeña.',
+    _ => 'Configuración personalizada de protocolo y transferencia.',
+  };
 
   @override
   Widget build(BuildContext context) {
+    super.build(context);
+    final theme = Theme.of(context);
     final sessions = widget.repository.sessions();
-    sessionId ??= sessions.firstOrNull?.id;
+    if (!sessions.any((s) => s.id == sessionId)) {
+      sessionId = sessions.firstOrNull?.id;
+    }
     final phases = sessionId == null
         ? <LabPhase>[]
         : widget.repository.phases(sessionId!);
-    if (!phases.any((p) => p.id == phaseId)) phaseId = phases.firstOrNull?.id;
+    if (!phases.any((p) => p.id == phaseId)) {
+      phaseId = phases.firstOrNull?.id;
+    }
+    Widget heading(String number, String title, String description) => Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('$number  $title', style: theme.textTheme.titleLarge),
+        const SizedBox(height: 5),
+        Text(description, style: theme.textTheme.bodyMedium),
+        const SizedBox(height: 18),
+      ],
+    );
+    Widget message() => feedback == null
+        ? const SizedBox.shrink()
+        : Padding(
+            padding: const EdgeInsets.only(top: 14),
+            child: Text(
+              feedback!,
+              style: TextStyle(
+                color:
+                    feedback!.startsWith('No se') ||
+                        feedback!.startsWith('Ensayo interrumpido') ||
+                        feedback!.startsWith('Conecta primero')
+                    ? theme.colorScheme.error
+                    : theme.colorScheme.onSurface,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          );
     return ListView(
-      padding: const EdgeInsets.fromLTRB(24, 18, 24, 42),
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 40),
       children: [
         ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 1080),
+          constraints: const BoxConstraints(maxWidth: 900),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                'Conecta el laboratorio',
-                style: Theme.of(context).textTheme.headlineLarge,
-              ),
-              const SizedBox(height: 8),
+              Text('Red y ensayos', style: theme.textTheme.headlineLarge),
+              const SizedBox(height: 7),
               const Text(
-                'Usa una LAN existente o un hotspot configurado en el sistema. No se necesita Internet.',
+                'Tres pasos para medir dispositivos en la misma red local.',
               ),
-              const SizedBox(height: 24),
-              LayoutBuilder(
-                builder: (context, constraints) {
-                  final wide = constraints.maxWidth > 700;
-                  final server = AcrylicPanel(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Icon(Icons.dns_outlined, size: 28),
-                        const SizedBox(height: 12),
-                        Text(
-                          'Este dispositivo como servidor',
-                          style: Theme.of(context).textTheme.titleLarge,
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          widget.network.isServing
-                              ? 'Escuchando en el puerto ${widget.network.port}'
-                              : 'Servidor detenido',
-                        ),
-                        const SizedBox(height: 10),
-                        if (widget.network.isServing)
-                          SelectableText(
-                            'Código de emparejamiento: ${widget.network.pairCode}',
-                            style: const TextStyle(fontWeight: FontWeight.w700),
-                          ),
-                        if (widget.network.isServing)
-                          Text(
-                            '${widget.network.connectedClients} clientes registrados · ${widget.network.readyWorkers} participantes listos',
-                          ),
-                        if (widget.network.isServing)
-                          TextButton.icon(
-                            onPressed: () => setState(() {}),
-                            icon: const Icon(Icons.refresh),
-                            label: const Text('Actualizar participantes'),
-                          ),
-                        const SizedBox(height: 8),
-                        for (final ip in localAddresses) SelectableText(ip),
-                        const SizedBox(height: 14),
-                        FilledButton.icon(
-                          onPressed: busy ? null : _toggleServer,
-                          icon: busy
-                              ? const GeometryLoader()
-                              : Icon(
-                                  widget.network.isServing
-                                      ? Icons.stop_circle_outlined
-                                      : Icons.play_arrow_rounded,
-                                ),
-                          label: Text(
-                            widget.network.isServing
-                                ? 'Detener servidor'
-                                : 'Iniciar servidor',
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                  final client = AcrylicPanel(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Icon(Icons.router_outlined, size: 28),
-                        const SizedBox(height: 12),
-                        Text(
-                          'Conectar a un servidor',
-                          style: Theme.of(context).textTheme.titleLarge,
-                        ),
-                        const SizedBox(height: 12),
-                        TextField(
-                          controller: address,
-                          decoration: const InputDecoration(
-                            labelText: 'URL local',
-                            hintText: 'http://192.168.1.1:8040',
-                          ),
-                          keyboardType: TextInputType.url,
-                        ),
-                        const SizedBox(height: 10),
-                        TextField(
-                          controller: code,
-                          decoration: const InputDecoration(
-                            labelText: 'Código de 6 dígitos',
-                          ),
-                          keyboardType: TextInputType.number,
-                        ),
-                        const SizedBox(height: 14),
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: [
-                            OutlinedButton.icon(
-                              onPressed: busy ? null : _discover,
-                              icon: busy
-                                  ? const GeometryLoader()
-                                  : const Icon(Icons.radar_rounded),
-                              label: const Text('Buscar en la LAN'),
-                            ),
-                            OutlinedButton.icon(
-                              onPressed: busy ? null : _probe,
-                              icon: const Icon(Icons.wifi_find),
-                              label: const Text('Diagnosticar conexión'),
-                            ),
-                            OutlinedButton.icon(
-                              onPressed: busy ? null : _toggleParticipant,
-                              icon: Icon(
-                                widget.network.isParticipating
-                                    ? Icons.stop_circle_outlined
-                                    : Icons.groups_outlined,
-                              ),
-                              label: Text(
-                                widget.network.isParticipating
-                                    ? 'Dejar de participar'
-                                    : 'Participar en ensayos',
-                              ),
-                            ),
-                          ],
-                        ),
-                        for (final server in discovered)
-                          TextButton(
-                            onPressed: () => setState(
-                              () => address.text = server.uri.toString(),
-                            ),
-                            child: Text(server.uri.toString()),
-                          ),
-                        if (widget.network.lastParticipantError != null)
-                          Text(
-                            'Último problema del participante: ${widget.network.lastParticipantError}',
-                            style: TextStyle(
-                              color: Theme.of(context).colorScheme.error,
-                            ),
-                          ),
-                        if (widget.repository.pendingResultCount > 0)
-                          Text(
-                            '${widget.repository.pendingResultCount} lotes de resultados conservados localmente; la sincronización se reintenta al participar en el mismo servidor.',
-                          ),
-                      ],
-                    ),
-                  );
-                  return wide
-                      ? Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Expanded(child: server),
-                            const SizedBox(width: 16),
-                            Expanded(child: client),
-                          ],
-                        )
-                      : Column(
-                          children: [
-                            server,
-                            const SizedBox(height: 14),
-                            client,
-                          ],
-                        );
-                },
+              const SizedBox(height: 19),
+              Wrap(
+                spacing: 10,
+                children: [
+                  ChoiceChip(
+                    label: const Text('Medir desde este dispositivo'),
+                    avatar: const Icon(Icons.speed_rounded, size: 18),
+                    selected: !serverMode,
+                    onSelected: (_) => setState(() => serverMode = false),
+                  ),
+                  ChoiceChip(
+                    label: const Text('Ofrecer servidor'),
+                    avatar: const Icon(Icons.dns_outlined, size: 18),
+                    selected: serverMode,
+                    onSelected: (_) {
+                      setState(() => serverMode = true);
+                      if (hotspot == null) _loadHotspot();
+                    },
+                  ),
+                ],
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 17),
               AcrylicPanel(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      'Red experimental',
-                      style: Theme.of(context).textTheme.titleLarge,
+                    heading(
+                      '01',
+                      serverMode ? 'Publicar servidor' : 'Conectar servidor',
+                      serverMode
+                          ? 'Comparte la dirección y el código con los demás dispositivos.'
+                          : 'Busca un servidor LANXIS o escribe la dirección que muestra el otro dispositivo.',
                     ),
-                    const SizedBox(height: 8),
-                    Text(
-                      hotspot == null
-                          ? 'Consultando capacidad Wi-Fi…'
-                          : hotspot!.active
-                          ? 'Hotspot local activo'
-                          : hotspot!.supported
-                          ? 'El dispositivo puede intentar crear un hotspot local.'
-                          : hotspot!.reason ??
-                                'Configura un hotspot o una LAN en el sistema.',
-                    ),
-                    if (hotspot?.active == true) ...[
-                      const SizedBox(height: 8),
-                      SelectableText(
-                        'SSID: ${hotspot!.ssid ?? 'No disponible'}',
+                    if (serverMode) ...[
+                      if (widget.network.isServing) ...[
+                        Text(
+                          'Servidor activo · puerto ${widget.network.port}',
+                          style: const TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                        const SizedBox(height: 7),
+                        SelectableText(
+                          'Código: ${widget.network.pairCode}',
+                          style: theme.textTheme.headlineMedium,
+                        ),
+                        const SizedBox(height: 7),
+                        for (final ip in localAddresses)
+                          ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            dense: true,
+                            title: Text(
+                              'http://${ip.split(': ').last}:${widget.network.port}',
+                            ),
+                            subtitle: Text(ip.split(': ').first),
+                            trailing: IconButton(
+                              tooltip: 'Copiar dirección',
+                              icon: const Icon(Icons.copy_rounded),
+                              onPressed: () async {
+                                await Clipboard.setData(
+                                  ClipboardData(
+                                    text:
+                                        'http://${ip.split(': ').last}:${widget.network.port}',
+                                  ),
+                                );
+                                if (mounted) {
+                                  setState(
+                                    () => feedback = 'Dirección copiada.',
+                                  );
+                                }
+                              },
+                            ),
+                          ),
+                        TextButton.icon(
+                          onPressed: () async {
+                            await Clipboard.setData(
+                              ClipboardData(text: widget.network.pairCode!),
+                            );
+                            if (mounted) {
+                              setState(() => feedback = 'Código copiado.');
+                            }
+                          },
+                          icon: const Icon(Icons.copy_rounded, size: 17),
+                          label: const Text('Copiar código'),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          '${widget.network.connectedClients} conectados · '
+                          '${widget.network.readyWorkers} listos para ensayos coordinados',
+                        ),
+                        const SizedBox(height: 12),
+                      ] else ...[
+                        const Text(
+                          'Al iniciarlo, aparecerá un código de seis dígitos y la IP que deben usar los demás.',
+                        ),
+                        const SizedBox(height: 12),
+                      ],
+                      FilledButton.icon(
+                        onPressed: busy ? null : _toggleServer,
+                        icon: busy && busyAction == 'server'
+                            ? const GeometryLoader()
+                            : Icon(
+                                widget.network.isServing
+                                    ? Icons.stop_circle_outlined
+                                    : Icons.play_arrow_rounded,
+                              ),
+                        label: Text(
+                          widget.network.isServing
+                              ? 'Detener servidor'
+                              : 'Iniciar servidor',
+                        ),
                       ),
-                      SelectableText(
-                        'Clave: ${hotspot!.passphrase ?? 'No disponible'}',
+                      const SizedBox(height: 12),
+                      ExpansionTile(
+                        tilePadding: EdgeInsets.zero,
+                        title: const Text('Opciones de red Wi-Fi'),
+                        children: [
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  hotspot == null
+                                      ? 'Consultando capacidad Wi-Fi…'
+                                      : hotspot!.active
+                                      ? 'Hotspot local activo'
+                                      : hotspot!.supported
+                                      ? 'Puedes crear un hotspot local.'
+                                      : hotspot!.reason ?? 'Configura una LAN desde el sistema.',
+                                ),
+                                if (hotspot?.active == true) ...[
+                                  SelectableText(
+                                    'SSID: ${hotspot!.ssid ?? 'No disponible'}',
+                                  ),
+                                  SelectableText(
+                                    'Clave: ${hotspot!.passphrase ?? 'No disponible'}',
+                                  ),
+                                ],
+                                const SizedBox(height: 8),
+                                Wrap(
+                                  spacing: 8,
+                                  children: [
+                                    if (hotspot?.supported == true)
+                                      OutlinedButton.icon(
+                                        onPressed: busy ? null : _toggleHotspot,
+                                        icon: const Icon(Icons.wifi_tethering),
+                                        label: Text(
+                                          hotspot!.active
+                                              ? 'Detener hotspot'
+                                              : 'Crear hotspot',
+                                        ),
+                                      ),
+                                    if (Platform.isAndroid)
+                                      TextButton.icon(
+                                        onPressed: () => hotspotAdapter
+                                            .openSystemWifiSettings(),
+                                        icon: const Icon(
+                                          Icons.settings_outlined,
+                                        ),
+                                        label: const Text('Ajustes Wi-Fi'),
+                                      ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
                       ),
+                    ] else ...[
+                      OutlinedButton.icon(
+                        onPressed: busy ? null : _discover,
+                        icon: busy && busyAction == 'discover'
+                            ? const GeometryLoader()
+                            : const Icon(Icons.radar_rounded),
+                        label: Text(
+                          busy && busyAction == 'discover'
+                              ? 'Buscando en la red local…'
+                              : 'Buscar servidores LANXIS',
+                        ),
+                      ),
+                      const SizedBox(height: 6),
                       const Text(
-                        'Comparte estos datos solo con participantes autorizados.',
+                        'La búsqueda encuentra servidores activos; las sesiones se eligen en el paso 2.',
+                      ),
+                      for (final server in discovered)
+                        ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          leading: const Icon(Icons.dns_outlined),
+                          title: Text(server.uri.toString()),
+                          trailing: const Text('Usar'),
+                          onTap: () => setState(
+                            () => address.text = server.uri.toString(),
+                          ),
+                        ),
+                      const SizedBox(height: 14),
+                      TextField(
+                        controller: address,
+                        keyboardType: TextInputType.url,
+                        decoration: const InputDecoration(
+                          labelText: 'Dirección del servidor',
+                          hintText: 'http://192.168.1.65:8040',
+                          helperText:
+                              'IP local y puerto que aparecen en el servidor',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: code,
+                        keyboardType: TextInputType.number,
+                        maxLength: 6,
+                        decoration: const InputDecoration(
+                          labelText: 'Código de seis dígitos',
+                          counterText: '',
+                        ),
+                      ),
+                      const SizedBox(height: 13),
+                      FilledButton.icon(
+                        onPressed: busy ? null : _connect,
+                        icon: busy && busyAction == 'connect'
+                            ? const GeometryLoader()
+                            : const Icon(Icons.link_rounded),
+                        label: Text(
+                          connected
+                              ? 'Volver a comprobar conexión'
+                              : 'Conectar y comprobar',
+                        ),
+                      ),
+                      if (connected) ...[
+                        const SizedBox(height: 10),
+                        Text(
+                          'Conectado a $connectedName',
+                          style: TextStyle(
+                            color: theme.colorScheme.primary,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: 10),
+                      ExpansionTile(
+                        tilePadding: EdgeInsets.zero,
+                        title: const Text(
+                          'Participar en ensayo de otro dispositivo',
+                        ),
+                        subtitle: Text(
+                          widget.network.isParticipating
+                              ? 'Participante listo · esperando instrucciones'
+                              : 'Úsalo si este teléfono será un cliente auxiliar en E4–E6.',
+                        ),
+                        children: [
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                FilledButton.tonalIcon(
+                                  onPressed:
+                                      busy ||
+                                          (!connected &&
+                                              !widget.network.isParticipating)
+                                      ? null
+                                      : _toggleParticipant,
+                                  icon: busy && busyAction == 'participant'
+                                      ? const GeometryLoader()
+                                      : Icon(
+                                          widget.network.isParticipating
+                                              ? Icons.stop_circle_outlined
+                                              : Icons.groups_outlined,
+                                        ),
+                                  label: Text(
+                                    widget.network.isParticipating
+                                        ? 'Dejar de participar'
+                                        : 'Participar ahora',
+                                  ),
+                                ),
+                                if (widget.network.lastParticipantError != null)
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 8),
+                                    child: Text(
+                                      'Conexión de participante: '
+                                      '${widget.network.lastParticipantError}',
+                                      style: TextStyle(
+                                        color: theme.colorScheme.error,
+                                      ),
+                                    ),
+                                  ),
+                                if (widget.repository.pendingResultCount > 0)
+                                  Text(
+                                    '${widget.repository.pendingResultCount} resultados pendientes de sincronización.',
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ],
                       ),
                     ],
+                    message(),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 15),
+              AcrylicPanel(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    heading(
+                      '02',
+                      'Guardar en una sesión',
+                      'La sesión agrupa el experimento; la fase agrupa las mediciones de una etapa.',
+                    ),
+                    Wrap(
+                      spacing: 9,
+                      runSpacing: 9,
+                      children: [
+                        OutlinedButton.icon(
+                          onPressed: busy ? null : _createSession,
+                          icon: const Icon(Icons.add_rounded),
+                          label: const Text('Nueva sesión'),
+                        ),
+                        if (sessionId != null)
+                          TextButton.icon(
+                            onPressed: busy ? null : _createPhase,
+                            icon: const Icon(Icons.add_rounded),
+                            label: const Text('Añadir fase'),
+                          ),
+                      ],
+                    ),
                     const SizedBox(height: 12),
                     Wrap(
                       spacing: 10,
                       runSpacing: 10,
                       children: [
-                        if (hotspot?.supported == true)
-                          OutlinedButton.icon(
-                            onPressed: busy ? null : _toggleHotspot,
-                            icon: busy
-                                ? const GeometryLoader()
-                                : const Icon(Icons.wifi_tethering),
-                            label: Text(
-                              hotspot!.active
-                                  ? 'Detener hotspot'
-                                  : 'Crear hotspot local',
-                            ),
-                          ),
-                        if (Platform.isAndroid)
-                          TextButton.icon(
-                            onPressed: () =>
-                                hotspotAdapter.openSystemWifiSettings(),
-                            icon: const Icon(Icons.settings_outlined),
-                            label: const Text('Abrir ajustes Wi-Fi'),
-                          ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 16),
-              AcrylicPanel(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Ejecutar ensayo HTTP',
-                      style: Theme.of(context).textTheme.titleLarge,
-                    ),
-                    const SizedBox(height: 6),
-                    const Text(
-                      'RTT de aplicación y descarga por bloques. Los datos se almacenan por ensayo y los fallos cuentan en el SLA.',
-                    ),
-                    const SizedBox(height: 6),
-                    const Text(
-                      'E4–E6 requieren coordinación simultánea de varios dispositivos; una ejecución individual no se registra como multicliente.',
-                    ),
-                    const SizedBox(height: 18),
-                    Wrap(
-                      spacing: 12,
-                      runSpacing: 12,
-                      children: [
                         SizedBox(
-                          width: 230,
+                          width: 260,
                           child: DropdownButtonFormField<String>(
+                            key: ValueKey('session-$sessionId'),
                             initialValue: sessionId,
                             decoration: const InputDecoration(
                               labelText: 'Sesión',
@@ -1483,16 +1871,16 @@ class _NetworkScreenState extends State<NetworkScreen> {
                             ],
                             onChanged: busy
                                 ? null
-                                : (v) => setState(() {
-                                    sessionId = v;
+                                : (value) => setState(() {
+                                    sessionId = value;
                                     phaseId = null;
                                   }),
                           ),
                         ),
                         SizedBox(
-                          width: 210,
+                          width: 230,
                           child: DropdownButtonFormField<String>(
-                            key: ValueKey(sessionId),
+                            key: ValueKey('phase-$sessionId-$phaseId'),
                             initialValue: phaseId,
                             decoration: const InputDecoration(
                               labelText: 'Fase',
@@ -1506,145 +1894,401 @@ class _NetworkScreenState extends State<NetworkScreen> {
                             ],
                             onChanged: busy
                                 ? null
-                                : (v) => setState(() => phaseId = v),
+                                : (value) => setState(() => phaseId = value),
                           ),
                         ),
-                        SizedBox(
-                          width: 160,
-                          child: DropdownButtonFormField<String>(
-                            initialValue: protocol,
-                            decoration: const InputDecoration(
-                              labelText: 'Protocolo',
-                            ),
-                            items: const [
-                              DropdownMenuItem(
-                                value: 'http',
-                                child: Text('HTTP'),
-                              ),
-                              DropdownMenuItem(
-                                value: 'tcp',
-                                child: Text('TCP'),
-                              ),
-                              DropdownMenuItem(
-                                value: 'udp',
-                                child: Text('UDP eco'),
-                              ),
-                            ],
-                            onChanged: busy
-                                ? null
-                                : (value) {
-                                    if (value != null) {
-                                      setState(() {
-                                        protocol = value;
-                                        if (value == 'udp') {
-                                          direction = 'download';
-                                        }
-                                      });
-                                    }
-                                  },
-                          ),
+                      ],
+                    ),
+                    if (sessions.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 10),
+                        child: Text(
+                          'Crea una sesión para guardar el primer ensayo.',
                         ),
-                        SizedBox(
-                          width: 160,
-                          child: DropdownButtonFormField<String>(
-                            initialValue: scenario,
-                            decoration: const InputDecoration(
-                              labelText: 'Escenario',
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 15),
+              AcrylicPanel(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    heading(
+                      '03',
+                      'Configurar y medir',
+                      'Elige un escenario, revisa el plan y comienza la medición.',
+                    ),
+                    SizedBox(
+                      width: 290,
+                      child: DropdownButtonFormField<String>(
+                        key: ValueKey('scenario-$scenario'),
+                        isExpanded: true,
+                        initialValue: scenario,
+                        decoration: const InputDecoration(
+                          labelText: 'Escenario de prueba',
+                        ),
+                        items: [
+                          for (final id in [
+                            ...List.generate(6, (index) => 'E${index + 1}'),
+                            'Libre',
+                          ])
+                            DropdownMenuItem(
+                              value: id,
+                              child: Text(
+                                id == 'Libre' ? 'Libre · configurar' : id,
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             ),
-                            items: [
-                              for (final s in [
-                                ...List.generate(6, (i) => 'E${i + 1}'),
-                                'Libre',
-                              ])
-                                DropdownMenuItem(value: s, child: Text(s)),
-                            ],
-                            onChanged: busy
-                                ? null
-                                : (v) {
-                                    if (v != null) _setScenario(v);
-                                  },
-                          ),
+                          for (final item
+                              in widget.repository.scenarioTemplates())
+                            DropdownMenuItem(
+                              value: item.id,
+                              child: Text(
+                                item.name,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                        ],
+                        onChanged: busy
+                            ? null
+                            : (value) {
+                                if (value != null) _setScenario(value);
+                              },
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    const Text('Tipo de ambiente'),
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 8,
+                      children: [
+                        ChoiceChip(
+                          label: const Text('Cerrado'),
+                          selected: environment == 'indoor',
+                          onSelected: busy
+                              ? null
+                              : (_) => setState(() => environment = 'indoor'),
+                        ),
+                        ChoiceChip(
+                          label: const Text('Abierto'),
+                          selected: environment == 'outdoor',
+                          onSelected: busy
+                              ? null
+                              : (_) => setState(() => environment = 'outdoor'),
                         ),
                       ],
                     ),
                     const SizedBox(height: 12),
-                    Wrap(
-                      spacing: 12,
-                      runSpacing: 12,
-                      children: [
-                        _NumberField(
-                          controller: count,
-                          label: 'Peticiones',
-                          width: 140,
-                        ),
-                        _NumberField(
-                          controller: clients,
-                          label: 'Clientes',
-                          width: 130,
-                        ),
-                        _NumberField(
-                          controller: distance,
-                          label: 'Distancia · m',
-                          width: 150,
-                        ),
-                        _NumberField(
-                          controller: payload,
-                          label: 'Carga · bytes',
-                          width: 160,
-                        ),
-                        SizedBox(
-                          width: 160,
-                          child: DropdownButtonFormField<String>(
-                            key: ValueKey('direction-$protocol-$direction'),
-                            initialValue: direction,
-                            decoration: const InputDecoration(
-                              labelText: 'Transferencia',
+                    if (isReferenceScenario) ...[
+                      const Text('Perfil de carga'),
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          for (final (label, value) in [
+                            ('Latencia', 'latency'),
+                            ('Equilibrada', 'balanced'),
+                            ('Transferencia', 'throughput'),
+                          ])
+                            ChoiceChip(
+                              label: Text(label),
+                              selected: loadProfile == value,
+                              onSelected: busy
+                                  ? null
+                                  : (_) => setState(() => loadProfile = value),
                             ),
-                            items: const [
-                              DropdownMenuItem(
-                                value: 'download',
-                                child: Text('Descarga'),
+                        ],
+                      ),
+                      const SizedBox(height: 14),
+                      _NumberField(
+                        controller: count,
+                        label: 'Muestras por cliente',
+                        width: 220,
+                      ),
+                      const SizedBox(height: 16),
+                      ValueListenableBuilder(
+                        valueListenable: count,
+                        builder: (context, value, child) {
+                          final plan = ScenarioPlanner.reference(
+                            scenarioId: scenario,
+                            environment: environment,
+                            load: loadProfile,
+                            readyClients: widget.network.readyWorkers,
+                            count: int.tryParse(count.text) ?? 100,
+                          );
+                          final config = plan.config;
+                          return Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.all(16),
+                            decoration: BoxDecoration(
+                              color: theme.colorScheme.primary.withValues(
+                                alpha: .07,
                               ),
-                              DropdownMenuItem(
-                                value: 'upload',
-                                child: Text('Subida'),
+                              borderRadius: BorderRadius.circular(17),
+                              border: Border.all(
+                                color: theme.colorScheme.primary.withValues(
+                                  alpha: .26,
+                                ),
+                              ),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Vista previa · $scenario',
+                                  style: theme.textTheme.titleLarge,
+                                ),
+                                const SizedBox(height: 6),
+                                Text(plan.description),
+                                const SizedBox(height: 10),
+                                Text(
+                                  '${config.clients} cliente(s) × '
+                                  '${config.count} muestras = ${plan.totalSamples} observaciones',
+                                ),
+                                Text(
+                                  'HTTP · ${config.payloadBytes} bytes por petición · '
+                                  '${config.intervalMs} ms entre peticiones por cliente',
+                                ),
+                                Text(
+                                  'Espera ${config.timeoutMs} ms · '
+                                  '${config.warmup} muestras de calentamiento',
+                                ),
+                                if (config.clients > 1) ...[
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    'Participantes listos: '
+                                    '${widget.network.readyWorkers}/${config.clients}',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w700,
+                                      color: plan.enoughParticipants
+                                          ? theme.colorScheme.primary
+                                          : theme.colorScheme.error,
+                                    ),
+                                  ),
+                                ],
+                                const SizedBox(height: 8),
+                                const Text(
+                                  'La distancia objetivo define la condición E1–E6. '
+                                  'LANXIS intenta medir la distancia real por Wi-Fi RTT '
+                                  'cuando el servidor es un punto de acceso compatible.',
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                    ] else ...[
+                      const SizedBox(height: 4),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          for (final (label, kind) in [
+                            ('Latencia', 'latency'),
+                            ('Descarga', 'download'),
+                            ('Subida', 'upload'),
+                            ('TCP', 'tcp'),
+                            ('UDP eco', 'udp'),
+                          ])
+                            ChoiceChip(
+                              label: Text(label),
+                              selected: preset == kind,
+                              onSelected: busy
+                                  ? null
+                                  : (_) => _applyPreset(kind),
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      Text(_presetDescription()),
+                      const SizedBox(height: 12),
+                      Wrap(
+                        spacing: 10,
+                        runSpacing: 10,
+                        children: [
+                          _NumberField(
+                            controller: count,
+                            label: 'Muestras por cliente',
+                            width: 215,
+                          ),
+                          _NumberField(
+                            controller: payload,
+                            label: 'Carga · bytes',
+                            width: 170,
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Adaptar a participantes listos'),
+                        subtitle: const Text(
+                          'Al iniciar en el servidor, usa los clientes activos.',
+                        ),
+                        value: customAutoClients,
+                        onChanged: busy
+                            ? null
+                            : (value) =>
+                                  setState(() => customAutoClients = value),
+                      ),
+                      ExpansionTile(
+                        tilePadding: EdgeInsets.zero,
+                        title: const Text('Parámetros personalizados'),
+                        children: [
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: Wrap(
+                              spacing: 10,
+                              runSpacing: 10,
+                              children: [
+                                SizedBox(
+                                  width: 150,
+                                  child: DropdownButtonFormField<String>(
+                                    key: ValueKey('protocol-$protocol'),
+                                    initialValue: protocol,
+                                    decoration: const InputDecoration(
+                                      labelText: 'Protocolo',
+                                    ),
+                                    items: const [
+                                      DropdownMenuItem(
+                                        value: 'http',
+                                        child: Text('HTTP'),
+                                      ),
+                                      DropdownMenuItem(
+                                        value: 'tcp',
+                                        child: Text('TCP'),
+                                      ),
+                                      DropdownMenuItem(
+                                        value: 'udp',
+                                        child: Text('UDP eco'),
+                                      ),
+                                    ],
+                                    onChanged: busy
+                                        ? null
+                                        : (value) {
+                                            if (value != null) {
+                                              setState(() {
+                                                protocol = value;
+                                                if (value == 'udp') {
+                                                  direction = 'download';
+                                                }
+                                                preset = 'custom';
+                                              });
+                                            }
+                                          },
+                                  ),
+                                ),
+                                SizedBox(
+                                  width: 155,
+                                  child: DropdownButtonFormField<String>(
+                                    key: ValueKey(
+                                      'direction-$protocol-$direction',
+                                    ),
+                                    initialValue: direction,
+                                    decoration: const InputDecoration(
+                                      labelText: 'Transferencia',
+                                    ),
+                                    items: const [
+                                      DropdownMenuItem(
+                                        value: 'download',
+                                        child: Text('Descarga'),
+                                      ),
+                                      DropdownMenuItem(
+                                        value: 'upload',
+                                        child: Text('Subida'),
+                                      ),
+                                    ],
+                                    onChanged: busy || protocol == 'udp'
+                                        ? null
+                                        : (value) {
+                                            if (value != null) {
+                                              setState(() {
+                                                direction = value;
+                                                preset = 'custom';
+                                              });
+                                            }
+                                          },
+                                  ),
+                                ),
+                                if (!customAutoClients)
+                                  _NumberField(
+                                    controller: clients,
+                                    label: 'Clientes',
+                                    width: 125,
+                                  ),
+                                _NumberField(
+                                  controller: interval,
+                                  label: 'Intervalo · ms',
+                                  width: 155,
+                                ),
+                                _NumberField(
+                                  controller: timeout,
+                                  label: 'Espera máxima · ms',
+                                  width: 190,
+                                ),
+                                _NumberField(
+                                  controller: warmup,
+                                  label: 'Calentamiento',
+                                  width: 155,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      TextButton.icon(
+                        onPressed: busy ? null : _saveTemplate,
+                        icon: const Icon(Icons.bookmark_add_outlined),
+                        label: Text(
+                          scenario == 'Libre'
+                              ? 'Guardar escenario'
+                              : 'Guardar copia personalizada',
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 12),
+                    ExpansionTile(
+                      tilePadding: EdgeInsets.zero,
+                      title: const Text('Distancia real'),
+                      subtitle: const Text(
+                        'Automática si es medible; no se exige para iniciar.',
+                      ),
+                      children: [
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'Wi-Fi RTT mide al punto de acceso compatible. '
+                                'Si el servidor es otro equipo en la red, la distancia '
+                                'queda sin dato para evitar una cifra falsa.',
+                              ),
+                              const SizedBox(height: 10),
+                              _NumberField(
+                                controller: distance,
+                                label: 'Introducir distancia medida · m (opcional)',
+                                width: 300,
                               ),
                             ],
-                            onChanged: busy || protocol == 'udp'
-                                ? null
-                                : (value) {
-                                    if (value != null) {
-                                      setState(() => direction = value);
-                                    }
-                                  },
                           ),
-                        ),
-                        _NumberField(
-                          controller: interval,
-                          label: 'Intervalo · ms',
-                          width: 160,
-                        ),
-                        _NumberField(
-                          controller: timeout,
-                          label: 'Timeout · ms',
-                          width: 160,
-                        ),
-                        _NumberField(
-                          controller: warmup,
-                          label: 'Calentamiento',
-                          width: 160,
                         ),
                       ],
                     ),
                     const SizedBox(height: 18),
-                    if (busy && progress > 0)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 12),
-                        child: LinearProgressIndicator(
-                          value: progress / (int.tryParse(count.text) ?? 1),
-                        ),
+                    if (busy && progress > 0) ...[
+                      LinearProgressIndicator(
+                        value: (progress / (int.tryParse(count.text) ?? 1))
+                            .clamp(0, 1),
                       ),
-                    Row(
+                      const SizedBox(height: 9),
+                    ],
+                    Wrap(
+                      spacing: 10,
+                      runSpacing: 8,
                       children: [
                         FilledButton.icon(
                           onPressed: busy ? null : _run,
@@ -1652,26 +2296,29 @@ class _NetworkScreenState extends State<NetworkScreen> {
                               ? const GeometryLoader()
                               : const Icon(Icons.play_arrow_rounded),
                           label: Text(
-                            busy ? 'Midiendo $progress…' : 'Iniciar ensayo',
+                            busy
+                                ? progress > 0
+                                      ? 'Midiendo $progress…'
+                                      : 'Preparando ensayo…'
+                                : 'Iniciar ensayo',
                           ),
                         ),
-                        if (busy && !coordinating) ...[
-                          const SizedBox(width: 12),
+                        if (busy && !coordinating)
                           TextButton(
                             onPressed: () => setState(() => cancel = true),
                             child: const Text('Cancelar'),
                           ),
-                        ],
                       ],
                     ),
+                    const SizedBox(height: 6),
+                    const Text(
+                      'Cada ejecución crea una prueba con sus muestras. '
+                      'Los resultados aparecen en Análisis.',
+                    ),
+                    message(),
                   ],
                 ),
               ),
-              if (feedback != null)
-                Padding(
-                  padding: const EdgeInsets.only(top: 16),
-                  child: AcrylicPanel(child: Text(feedback!)),
-                ),
             ],
           ),
         ),

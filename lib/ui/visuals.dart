@@ -9,6 +9,8 @@ class LanxisColors {
   static const blue = Color(0xFF5576E8);
   static const mint = Color(0xFF83D8C5);
   static const ice = Color(0xFFF2F7FB);
+  static const charcoal = Color(0xFF1C1E24);
+  static const slate = Color(0xFF282B33);
 }
 
 ThemeData lanxisTheme(Brightness brightness) {
@@ -17,12 +19,12 @@ ThemeData lanxisTheme(Brightness brightness) {
     seedColor: LanxisColors.blue,
     brightness: brightness,
     primary: dark ? LanxisColors.cyan : const Color(0xFF3159D3),
-    surface: dark ? const Color(0xFF101D32) : Colors.white,
+    surface: dark ? LanxisColors.slate : Colors.white,
   );
   final base = ThemeData(
     colorScheme: scheme,
     useMaterial3: true,
-    scaffoldBackgroundColor: dark ? const Color(0xFF081526) : LanxisColors.ice,
+    scaffoldBackgroundColor: dark ? LanxisColors.charcoal : LanxisColors.ice,
     fontFamily: 'Manrope',
   );
   return base.copyWith(
@@ -62,9 +64,16 @@ ThemeData lanxisTheme(Brightness brightness) {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       ),
     ),
+    chipTheme: base.chipTheme.copyWith(
+      selectedColor: dark ? const Color(0xFF344046) : const Color(0xFFE1EDF2),
+      backgroundColor: dark ? const Color(0xFF292C33) : Colors.white,
+      side: BorderSide(
+        color: dark ? const Color(0xFF4A545B) : const Color(0xFFC7D2DC),
+      ),
+    ),
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
-      fillColor: dark ? const Color(0xFF172A43) : const Color(0xFFEAF1F8),
+      fillColor: dark ? const Color(0xFF343840) : const Color(0xFFEAF1F8),
       border: OutlineInputBorder(
         borderRadius: BorderRadius.circular(14),
         borderSide: BorderSide.none,
@@ -144,8 +153,9 @@ class _GaussianMarkPainter extends CustomPainter {
 }
 
 class GaussianBoot extends StatefulWidget {
-  const GaussianBoot({super.key, required this.ready});
+  const GaussianBoot({super.key, required this.ready, this.onFinished});
   final bool ready;
+  final VoidCallback? onFinished;
   @override
   State<GaussianBoot> createState() => _GaussianBootState();
 }
@@ -155,11 +165,20 @@ class _GaussianBootState extends State<GaussianBoot>
   late final AnimationController controller = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 2600),
-  )..forward();
+  );
+  @override
+  void initState() {
+    super.initState();
+    controller.addStatusListener((status) {
+      if (status == AnimationStatus.completed) widget.onFinished?.call();
+    });
+    if (widget.ready) controller.forward();
+  }
+
   @override
   void didUpdateWidget(covariant GaussianBoot oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.ready && !controller.isAnimating && controller.value < 1) {
+    if (widget.ready && !oldWidget.ready && controller.value < 1) {
       controller.forward();
     }
   }
@@ -184,7 +203,9 @@ class _GaussianBootState extends State<GaussianBoot>
             painter: _GaussianBootPainter(
               reduced ? 1 : controller.value,
               Theme.of(context).colorScheme.primary,
-              Theme.of(context).colorScheme.secondary,
+              Theme.of(context).brightness == Brightness.dark
+                  ? LanxisColors.mint
+                  : Theme.of(context).colorScheme.secondary,
             ),
           ),
         ),
@@ -216,7 +237,7 @@ class _GaussianBootPainter extends CustomPainter {
           secondary,
           primary,
           gaussian,
-        )!.withValues(alpha: .48 + .48 * convergence);
+        )!.withValues(alpha: .75 + .25 * convergence);
       canvas.drawRRect(
         RRect.fromRectAndRadius(
           Rect.fromLTWH(x - width * .24, base - h, width * .48, h),
@@ -353,10 +374,6 @@ class _MathPainter extends CustomPainter {
       '∞',
       'f(x)',
     ];
-    canvas.saveLayer(
-      Offset.zero & size,
-      Paint()..imageFilter = ui.ImageFilter.blur(sigmaX: 3, sigmaY: 3),
-    );
     for (var i = 0; i < labels.length; i++) {
       final x = ((i * 173 + 41) % 1000) / 1000 * size.width;
       final y = ((i * 227 + 63) % 1000) / 1000 * size.height;
@@ -366,16 +383,20 @@ class _MathPainter extends CustomPainter {
           style: TextStyle(
             fontFamily: 'Space Grotesk',
             fontSize: 22 + (i % 4) * 9,
-            color: (dark ? LanxisColors.cyan : LanxisColors.blue).withValues(
-              alpha: dark ? .11 : .09,
-            ),
+            color: Colors.transparent,
+            shadows: [
+              Shadow(
+                color: (dark ? const Color(0xFFB8C4C9) : LanxisColors.blue)
+                    .withValues(alpha: dark ? .12 : .13),
+                blurRadius: 6,
+              ),
+            ],
           ),
         ),
         textDirection: TextDirection.ltr,
       )..layout();
       painter.paint(canvas, Offset(x, y));
     }
-    canvas.restore();
   }
 
   @override
@@ -388,36 +409,210 @@ class AcrylicPanel extends StatelessWidget {
     required this.child,
     this.padding = const EdgeInsets.all(22),
     this.radius = 24,
+    this.blur = false,
   });
   final Widget child;
   final EdgeInsets padding;
   final double radius;
+  final bool blur;
   @override
   Widget build(BuildContext context) {
     final dark = Theme.of(context).brightness == Brightness.dark;
+    final panel = Container(
+      padding: padding,
+      decoration: BoxDecoration(
+        color: dark ? const Color(0xE8282B33) : const Color(0xEFFFFFFF),
+        borderRadius: BorderRadius.circular(radius),
+        border: Border.all(
+          color: dark ? const Color(0x3D9EABB2) : Colors.white,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: dark ? .16 : .05),
+            blurRadius: 26,
+            offset: const Offset(0, 12),
+          ),
+        ],
+      ),
+      child: Material(type: MaterialType.transparency, child: child),
+    );
     return ClipRRect(
       borderRadius: BorderRadius.circular(radius),
-      child: BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: 14, sigmaY: 14),
-        child: Container(
-          padding: padding,
-          decoration: BoxDecoration(
-            color: dark ? const Color(0xD9203049) : const Color(0xEFFFFFFF),
-            borderRadius: BorderRadius.circular(radius),
-            border: Border.all(
-              color: dark ? const Color(0x4483D8C5) : Colors.white,
+      child: blur
+          ? BackdropFilter(
+              filter: ui.ImageFilter.blur(sigmaX: 6, sigmaY: 6),
+              child: panel,
+            )
+          : panel,
+    );
+  }
+}
+
+class GeometricNavBar extends StatelessWidget {
+  const GeometricNavBar({
+    super.key,
+    required this.controller,
+    required this.selectedIndex,
+    required this.labels,
+    required this.icons,
+    required this.onSelected,
+  });
+  final PageController controller;
+  final int selectedIndex;
+  final List<String> labels;
+  final List<IconData> icons;
+  final ValueChanged<int> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final reduced = MediaQuery.disableAnimationsOf(context);
+    final bottom = MediaQuery.paddingOf(context).bottom;
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: dark ? const Color(0xFF25272E) : const Color(0xFFF2F5FA),
+      elevation: 0,
+      child: Container(
+        decoration: BoxDecoration(
+          border: Border(
+            top: BorderSide(
+              color: scheme.outlineVariant.withValues(alpha: .35),
             ),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: dark ? .16 : .05),
-                blurRadius: 26,
-                offset: const Offset(0, 12),
-              ),
-            ],
           ),
-          child: child,
+        ),
+        height: 72 + bottom,
+        child: Padding(
+          padding: EdgeInsets.only(bottom: bottom),
+          child: AnimatedBuilder(
+            animation: controller,
+            builder: (context, _) {
+              final position =
+                  controller.hasClients &&
+                      controller.position.hasContentDimensions
+                  ? (controller.page ?? selectedIndex.toDouble())
+                  : selectedIndex.toDouble();
+              return Stack(
+                children: [
+                  Positioned.fill(
+                    child: CustomPaint(
+                      painter: _MorphBubblePainter(
+                        reduced ? selectedIndex.toDouble() : position,
+                        labels.length,
+                        scheme.primary,
+                        dark,
+                      ),
+                    ),
+                  ),
+                  Row(
+                    children: [
+                      for (var i = 0; i < labels.length; i++)
+                        Expanded(
+                          child: Semantics(
+                            button: true,
+                            selected: i == selectedIndex,
+                            label: labels[i],
+                            child: InkWell(
+                              onTap: () => onSelected(i),
+                              child: SizedBox(
+                                height: 72,
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Icon(
+                                      icons[i],
+                                      size: 22,
+                                      color: i == selectedIndex
+                                          ? scheme.primary
+                                          : scheme.onSurfaceVariant,
+                                    ),
+                                    const SizedBox(height: 3),
+                                    Text(
+                                      labels[i],
+                                      maxLines: 1,
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: i == selectedIndex
+                                            ? FontWeight.w700
+                                            : FontWeight.w500,
+                                        color: i == selectedIndex
+                                            ? scheme.primary
+                                            : scheme.onSurfaceVariant,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ],
+              );
+            },
+          ),
         ),
       ),
     );
   }
+}
+
+class _MorphBubblePainter extends CustomPainter {
+  _MorphBubblePainter(this.position, this.count, this.color, this.dark);
+  final double position;
+  final int count;
+  final Color color;
+  final bool dark;
+
+  double _radiusAt(int shape, double angle) {
+    final sides = [4, 3, 6, 0][shape.clamp(0, 3)];
+    if (sides == 0) return 26;
+    final sector = 2 * math.pi / sides;
+    final local = (angle + math.pi / 2 + sector / 2) % sector - sector / 2;
+    return 26 * math.cos(math.pi / sides) / math.cos(local);
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (count == 0) return;
+    final from = position.floor().clamp(0, count - 1);
+    final to = (from + 1).clamp(0, count - 1);
+    final mix = (position - from).clamp(0.0, 1.0);
+    final center = Offset(size.width * (position + .5) / count, 28);
+    final path = Path();
+    for (var i = 0; i <= 64; i++) {
+      final angle = -math.pi / 2 + i * math.pi * 2 / 64;
+      final radius = ui.lerpDouble(
+        _radiusAt(from, angle),
+        _radiusAt(to, angle),
+        mix,
+      )!;
+      final point =
+          center +
+          Offset(math.cos(angle) * radius, math.sin(angle) * radius * .79);
+      if (i == 0) {
+        path.moveTo(point.dx, point.dy);
+      } else {
+        path.lineTo(point.dx, point.dy);
+      }
+    }
+    canvas.drawPath(
+      path..close(),
+      Paint()..color = color.withValues(alpha: dark ? .19 : .12),
+    );
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = color.withValues(alpha: dark ? .72 : .46)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.2,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _MorphBubblePainter old) =>
+      old.position != position ||
+      old.count != count ||
+      old.color != color ||
+      old.dark != dark;
 }

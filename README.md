@@ -19,9 +19,13 @@ Las compilaciones nativas se hacen en su sistema correspondiente. `flutter build
 
 ## Investigación de referencia
 
-El diseño factorial E1–E6 reproduce la investigación «Proyecto Final - Servidor Hotspot (Requerimientos y Estadísticas)» proporcionada por el responsable. Las distancias nominales son 1, 6 y 12 m, con un cliente o 3–5 clientes. El tamaño de referencia es 100 solicitudes por escenario y es configurable. RTT HTTP, jitter, throughput, errores y contexto se guardan por ensayo; nunca se presentan resultados de ejemplo como mediciones reales.
+El diseño factorial E1–E6 reproduce la investigación «Proyecto Final - Servidor Hotspot (Requerimientos y Estadísticas)» proporcionada por el responsable. Las distancias objetivo son 1, 6 y 12 m, con un cliente o 3–5 clientes. La vista previa adapta participantes, carga, intervalo, espera y calentamiento según los dispositivos listos, el ambiente cerrado o abierto y el perfil de carga. También se pueden guardar escenarios propios. El tamaño de referencia es 100 solicitudes por escenario y es configurable. RTT HTTP, jitter, throughput, errores y contexto se guardan por ensayo; nunca se presentan resultados de ejemplo como mediciones reales.
+
+La distancia real no se exige para iniciar. En Android, la app intenta medirla con Wi-Fi RTT únicamente si el servidor coincide con el punto de acceso conectado y ambos admiten 802.11mc; en otros casos conserva el campo vacío o permite registrar una medición externa como manual. ESPectre usa información de estado del canal Wi-Fi para detectar movimiento, no ofrece por sí solo una medida fiable de metros entre cualquier par de clientes LAN.
 
 En **Análisis** se puede filtrar por sesión, fase, prueba y ensayo, y explorar distribuciones teóricas con parámetros propios. La selección puede exportarse como CSV, JSON, XLSX, PDF o ZIP; el ZIP incluye manifiesto y hashes SHA-256. En **Red local**, las transferencias HTTP y TCP de descarga y subida usan bloques reproducibles con verificación de integridad; el eco UDP mide respuesta o ausencia de respuesta por datagrama. Los participantes coordinados conservan lotes de resultados pendientes en SQLite hasta recibir confirmación.
+
+Para una prueba entre dispositivos: en el equipo servidor, abre **Red local → Ofrecer servidor** y comparte la dirección y el código; en el cliente, usa **Conectar servidor → Conectar y comprobar**. Después crea o selecciona una sesión y una fase, revisa la vista previa del escenario y pulsa **Iniciar ensayo**. Para E4–E6, los clientes deben activar **Participar en ensayo de otro dispositivo** y el servidor muestra cuántos están listos.
 
 ## Licencia
 

@@ -49,7 +49,8 @@ void main() {
   test('reference matrix has six scenarios and configurable sample size', () {
     final scenarios = TrialConfig.referenceScenarios(count: 42);
     expect(scenarios.length, 6);
-    expect(scenarios.map((s) => s.distanceM), [1, 6, 12, 1, 6, 12]);
+    expect(scenarios.map((s) => s.targetDistanceM), [1, 6, 12, 1, 6, 12]);
+    expect(scenarios.every((s) => s.distanceM == null), true);
     expect(scenarios.every((s) => s.count == 42), true);
   });
 }

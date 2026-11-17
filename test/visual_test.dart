@@ -48,4 +48,78 @@ void main() {
       );
     });
   }
+  for (final brightness in [Brightness.light, Brightness.dark]) {
+    testWidgets('network ${brightness.name} 390x844', (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final repo = LabRepository.inMemory();
+      addTearDown(repo.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: lanxisTheme(brightness),
+          home: LabShell(
+            repository: repo,
+            network: NetworkLab(repo),
+            mode: brightness == Brightness.dark
+                ? ThemeMode.dark
+                : ThemeMode.light,
+            onModeChanged: (_) {},
+          ),
+        ),
+      );
+      await tester.tap(find.text('Red local').last);
+      await tester.pumpAndSettle();
+      await expectLater(
+        find.byType(LabShell),
+        matchesGoldenFile('goldens/network_${brightness.name}_390.png'),
+      );
+    });
+  }
+  testWidgets('boot dark at Gaussian formation', (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: lanxisTheme(Brightness.dark),
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: Stack(
+              children: [
+                const Positioned.fill(child: MathBackground()),
+                Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const GaussianMark(size: 52),
+                      const SizedBox(height: 24),
+                      Text(
+                        'LANXIS',
+                        style: Theme.of(context).textTheme.displayLarge,
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        'Preparando laboratorio local',
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
+                      const SizedBox(height: 34),
+                      const GaussianBoot(ready: true),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 1300));
+    await expectLater(
+      find.byType(Scaffold),
+      matchesGoldenFile('goldens/boot_dark_390.png'),
+    );
+  });
 }

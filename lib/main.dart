@@ -29,7 +29,9 @@ class _LanxisAppState extends State<LanxisApp> {
   @override
   void initState() {
     super.initState();
-    _initialize();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _initialize();
+    });
   }
 
   Future<void> _initialize() async {
@@ -50,15 +52,14 @@ class _LanxisAppState extends State<LanxisApp> {
             ? ThemeMode.dark
             : ThemeMode.system;
       });
-      // This interval finishes the brand entrance after initialization succeeds.
-      if (!WidgetsBinding
-          .instance
-          .platformDispatcher
-          .accessibilityFeatures
-          .disableAnimations) {
-        await Future<void>.delayed(const Duration(milliseconds: 2800));
+      if (WidgetsBinding
+              .instance
+              .platformDispatcher
+              .accessibilityFeatures
+              .disableAnimations &&
+          mounted) {
+        setState(() => introComplete = true);
       }
-      if (mounted) setState(() => introComplete = true);
     } catch (e) {
       if (mounted) setState(() => error = e);
     }
@@ -111,33 +112,40 @@ class _LanxisAppState extends State<LanxisApp> {
             ),
           )
         : repository == null || !introComplete
-        ? Scaffold(
-            body: Stack(
-              children: [
-                const Positioned.fill(child: MathBackground()),
-                Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const GaussianMark(size: 52),
-                      const SizedBox(height: 24),
-                      Text(
-                        'LANXIS',
-                        style: Theme.of(context).textTheme.displayLarge,
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        repository == null
-                            ? 'Preparando laboratorio local'
-                            : 'Laboratorio listo',
-                        style: Theme.of(context).textTheme.bodyMedium,
-                      ),
-                      const SizedBox(height: 34),
-                      GaussianBoot(ready: repository != null),
-                    ],
+        ? Builder(
+            builder: (context) => Scaffold(
+              body: Stack(
+                children: [
+                  const Positioned.fill(child: MathBackground()),
+                  Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const GaussianMark(size: 52),
+                        const SizedBox(height: 24),
+                        Text(
+                          'LANXIS',
+                          style: Theme.of(context).textTheme.displayLarge,
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          repository == null
+                              ? 'Preparando laboratorio local'
+                              : 'Laboratorio listo',
+                          style: Theme.of(context).textTheme.bodyMedium,
+                        ),
+                        const SizedBox(height: 34),
+                        GaussianBoot(
+                          ready: repository != null,
+                          onFinished: () {
+                            if (mounted) setState(() => introComplete = true);
+                          },
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           )
         : LabShell(

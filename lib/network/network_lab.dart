@@ -8,6 +8,7 @@ import 'package:uuid/uuid.dart';
 
 import '../core/models.dart';
 import '../data/lab_repository.dart';
+import '../platform/distance_probe.dart';
 import 'tcp_transfer.dart';
 import 'udp_echo.dart';
 
@@ -152,6 +153,8 @@ class NetworkLab {
   Future<List<DiscoveredServer>> discover({
     Duration duration = const Duration(seconds: 2),
     InternetAddress? target,
+    Iterable<InternetAddress>? fallbackAddresses,
+    int fallbackPort = 8040,
   }) async {
     final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
     socket.broadcastEnabled = true;
@@ -176,16 +179,128 @@ class NetworkLab {
       }
     });
     try {
-      socket.send(
-        utf8.encode('LANXIS_DISCOVER_V1'),
-        target ?? InternetAddress('255.255.255.255'),
-        8041,
-      );
+      var localInterfaces = <NetworkInterface>[];
+      final destinations = <String>{
+        if (target != null) target.address else '255.255.255.255',
+      };
+      if (target == null) {
+        // Some routers drop the all-subnets broadcast but accept a subnet one.
+        localInterfaces = await NetworkInterface.list(
+          type: InternetAddressType.IPv4,
+        );
+        for (final interface in localInterfaces) {
+          for (final ip in interface.addresses) {
+            if (ip.isLoopback || ip.rawAddress.length != 4) continue;
+            final octets = ip.rawAddress;
+            destinations.add('${octets[0]}.${octets[1]}.${octets[2]}.255');
+          }
+        }
+      }
+      for (final destination in destinations) {
+        try {
+          socket.send(
+            utf8.encode('LANXIS_DISCOVER_V1'),
+            InternetAddress(destination),
+            8041,
+          );
+        } on SocketException {
+          // Keep trying the remaining interfaces.
+        }
+      }
       await Future<void>.delayed(duration);
+      if (found.isEmpty && (target == null || fallbackAddresses != null)) {
+        final candidates =
+            fallbackAddresses ?? _localScanAddresses(localInterfaces);
+        for (final server in await _scanHealth(candidates, fallbackPort)) {
+          found[server.address.address] = server;
+        }
+      }
       return found.values.toList();
     } finally {
       await subscription.cancel();
       socket.close();
+    }
+  }
+
+  Iterable<InternetAddress> _localScanAddresses(
+    List<NetworkInterface> interfaces,
+  ) sync* {
+    final preferred = interfaces.where(
+      (item) => RegExp(
+        r'^(wlan|wifi|wi-fi|wl|eth|en|ap)',
+        caseSensitive: false,
+      ).hasMatch(item.name),
+    );
+    final selected = preferred.isEmpty ? interfaces : preferred;
+    final seen = <String>{};
+    for (final interface in selected.take(2)) {
+      for (final address in interface.addresses) {
+        final bytes = address.rawAddress;
+        if (bytes.length != 4 ||
+            !(bytes[0] == 10 ||
+                bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31 ||
+                bytes[0] == 192 && bytes[1] == 168)) {
+          continue;
+        }
+        for (var last = 1; last < 255; last++) {
+          if (last == bytes[3]) continue;
+          final host = '${bytes[0]}.${bytes[1]}.${bytes[2]}.$last';
+          if (seen.add(host)) yield InternetAddress(host);
+        }
+      }
+    }
+  }
+
+  Future<List<DiscoveredServer>> _scanHealth(
+    Iterable<InternetAddress> addresses,
+    int port,
+  ) async {
+    final candidates = addresses.take(508).toList();
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(milliseconds: 350);
+    Future<DiscoveredServer?> check(InternetAddress address) async {
+      try {
+        final uri = Uri(
+          scheme: 'http',
+          host: address.address,
+          port: port,
+          path: '/health',
+        );
+        final request = await client
+            .getUrl(uri)
+            .timeout(const Duration(milliseconds: 500));
+        final response = await request.close().timeout(
+          const Duration(milliseconds: 500),
+        );
+        if (response.statusCode != HttpStatus.ok) return null;
+        final data = jsonDecode(
+          await utf8.decoder
+              .bind(response)
+              .join()
+              .timeout(const Duration(milliseconds: 500)),
+        );
+        if (data is Map &&
+            data['name'] == 'LANXIS' &&
+            data['version'] == protocolVersion) {
+          return DiscoveredServer(address, port);
+        }
+      } catch (_) {
+        // A closed port or another service is expected during LAN discovery.
+      }
+      return null;
+    }
+
+    try {
+      final found = <DiscoveredServer>[];
+      for (var index = 0; index < candidates.length; index += 32) {
+        final batch = await Future.wait(
+          candidates.skip(index).take(32).map(check),
+        );
+        found.addAll(batch.whereType<DiscoveredServer>());
+      }
+      return found;
+    } finally {
+      client.close(force: true);
     }
   }
 
@@ -323,7 +438,14 @@ class NetworkLab {
                     requestId: raw['request_id'] as String,
                     scenarioId: job.config.scenarioId,
                     clients: job.config.clients,
-                    distanceM: job.config.distanceM,
+                    distanceM: (raw['distancia_m'] as num?)?.toDouble(),
+                    distanceSource:
+                        raw['origen_distancia'] as String? ?? 'unknown',
+                    distanceUncertaintyM:
+                        (raw['incertidumbre_distancia_m'] as num?)?.toDouble(),
+                    targetDistanceM: (raw['distancia_objetivo_m'] as num?)
+                        ?.toDouble(),
+                    environment: raw['ambiente'] as String? ?? 'unknown',
                     timestampUtc: DateTime.parse(
                       raw['timestamp_utc'] as String,
                     ),
@@ -336,6 +458,8 @@ class NetworkLab {
                     httpStatus: raw['http_status'] as int?,
                     error: raw['error'] as String?,
                     warmup: raw['warmup'] == true,
+                    protocol:
+                        raw['protocolo'] as String? ?? job.config.protocol,
                     clientId: id,
                   ),
                 );
@@ -845,7 +969,24 @@ class NetworkLab {
     if (config.protocol == 'udp' && udpPort == null) {
       throw UnsupportedError('Este servidor no ofrece eco UDP');
     }
-    final testId = repository.createTest(phase.id, config.scenarioId, config);
+    final observation = config.distanceM == null
+        ? await const DistanceProbe().measure(base)
+        : DistanceObservation(
+            meters: config.distanceM,
+            source: config.distanceSource == 'unknown'
+                ? 'manual'
+                : config.distanceSource,
+          );
+    final effectiveConfig = config.withDistance(
+      observation.meters,
+      observation.source,
+      observation.uncertaintyM,
+    );
+    final testId = repository.createTest(
+      phase.id,
+      config.scenarioId,
+      effectiveConfig,
+    );
     final trialId = repository.startTrial(testId);
     final client = HttpClient()
       ..connectionTimeout = Duration(milliseconds: config.timeoutMs);
@@ -1002,7 +1143,11 @@ class NetworkLab {
           requestId: requestId,
           scenarioId: config.scenarioId,
           clients: config.clients,
-          distanceM: config.distanceM,
+          distanceM: effectiveConfig.distanceM,
+          distanceSource: effectiveConfig.distanceSource,
+          distanceUncertaintyM: effectiveConfig.distanceUncertaintyM,
+          targetDistanceM: effectiveConfig.targetDistanceM,
+          environment: effectiveConfig.environment,
           timestampUtc: DateTime.now().toUtc(),
           success: success,
           bytesReceived: bytes,

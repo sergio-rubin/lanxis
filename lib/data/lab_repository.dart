@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:path_provider/path_provider.dart';
@@ -131,6 +132,60 @@ class LabRepository {
         rethrow;
       }
     }
+    if (version < 5) {
+      _db.execute('PRAGMA foreign_keys = OFF');
+      _db.execute('BEGIN IMMEDIATE');
+      try {
+        _db.execute('''
+          ALTER TABLE measurements RENAME TO measurements_legacy;
+          CREATE TABLE measurements (
+            id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id),
+            phase_id TEXT NOT NULL REFERENCES phases(id),
+            test_id TEXT NOT NULL REFERENCES tests(id),
+            trial_id TEXT NOT NULL REFERENCES trials(id),
+            request_id TEXT NOT NULL UNIQUE, scenario_id TEXT NOT NULL,
+            clients INTEGER NOT NULL, distance_m REAL,
+            distance_source TEXT NOT NULL DEFAULT 'unknown',
+            distance_uncertainty_m REAL,
+            target_distance_m REAL, environment TEXT NOT NULL DEFAULT 'unknown',
+            timestamp_utc TEXT NOT NULL, protocol TEXT NOT NULL,
+            latency_ms REAL, jitter_ms REAL, speed_mbps REAL,
+            bytes_received INTEGER NOT NULL, bytes_sent INTEGER NOT NULL DEFAULT 0,
+            success INTEGER NOT NULL, http_status INTEGER, error TEXT,
+            rssi_dbm INTEGER, warmup INTEGER NOT NULL DEFAULT 0,
+            client_id TEXT
+          );
+          INSERT INTO measurements (
+            id, session_id, phase_id, test_id, trial_id, request_id,
+            scenario_id, clients, distance_m, distance_source,
+            timestamp_utc, protocol, latency_ms, jitter_ms, speed_mbps,
+            bytes_received, bytes_sent, success, http_status, error,
+            rssi_dbm, warmup, client_id
+          ) SELECT
+            id, session_id, phase_id, test_id, trial_id, request_id,
+            scenario_id, clients, NULLIF(distance_m, 0), 'legacy_unverified',
+            timestamp_utc, protocol, latency_ms, jitter_ms, speed_mbps,
+            bytes_received, bytes_sent, success, http_status, error,
+            rssi_dbm, warmup, client_id
+          FROM measurements_legacy;
+          DROP TABLE measurements_legacy;
+          CREATE INDEX idx_measurements_session_time ON measurements(session_id, timestamp_utc);
+          CREATE INDEX idx_measurements_trial ON measurements(trial_id);
+          CREATE INDEX idx_measurements_client ON measurements(client_id);
+          CREATE TABLE scenario_templates (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, data_json TEXT NOT NULL,
+            created_utc TEXT NOT NULL
+          );
+        ''');
+        _db.execute('PRAGMA user_version = 5');
+        _db.execute('COMMIT');
+      } catch (_) {
+        _db.execute('ROLLBACK');
+        rethrow;
+      } finally {
+        _db.execute('PRAGMA foreign_keys = ON');
+      }
+    }
   }
 
   String get clientIdentity {
@@ -165,6 +220,41 @@ class LabRepository {
 
   int get pendingResultCount =>
       _db.select('SELECT COUNT(*) AS n FROM result_outbox').first['n'] as int;
+
+  List<ScenarioTemplate> scenarioTemplates() => _db
+      .select('SELECT * FROM scenario_templates ORDER BY created_utc DESC')
+      .map(ScenarioTemplate.fromRow)
+      .toList();
+
+  ScenarioTemplate saveScenarioTemplate(
+    String name,
+    TrialConfig config, {
+    bool autoClients = false,
+  }) {
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) throw ArgumentError('El nombre es obligatorio');
+    final id = 'custom-${_uuid.v4()}';
+    final item = ScenarioTemplate(
+      id: id,
+      name: trimmed,
+      config: config.withScenario(id),
+      autoClients: autoClients,
+    );
+    _db.execute(
+      'INSERT INTO scenario_templates '
+      '(id, name, data_json, created_utc) VALUES (?, ?, ?, ?)',
+      [
+        id,
+        trimmed,
+        jsonEncode(item.toJson()),
+        DateTime.now().toUtc().toIso8601String(),
+      ],
+    );
+    return item;
+  }
+
+  void deleteScenarioTemplate(String id) =>
+      _db.execute('DELETE FROM scenario_templates WHERE id = ?', [id]);
 
   void acknowledgeResult(String id) =>
       _db.execute('DELETE FROM result_outbox WHERE id = ?', [id]);
@@ -266,10 +356,12 @@ class LabRepository {
     _db.execute(
       '''INSERT OR IGNORE INTO measurements (
       id, session_id, phase_id, test_id, trial_id, request_id,
-      scenario_id, clients, distance_m, timestamp_utc, protocol,
+      scenario_id, clients, distance_m, distance_source,
+      distance_uncertainty_m,
+      target_distance_m, environment, timestamp_utc, protocol,
       latency_ms, jitter_ms, speed_mbps, bytes_received, success,
       http_status, error, rssi_dbm, warmup, client_id, bytes_sent
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
       [
         item.id,
         item.sessionId,
@@ -280,6 +372,10 @@ class LabRepository {
         item.scenarioId,
         item.clients,
         item.distanceM,
+        item.distanceSource,
+        item.distanceUncertaintyM,
+        item.targetDistanceM,
+        item.environment,
         item.timestampUtc.toUtc().toIso8601String(),
         item.protocol,
         item.latencyMs,

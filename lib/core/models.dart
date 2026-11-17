@@ -50,8 +50,12 @@ class TrialConfig {
   const TrialConfig({
     required this.scenarioId,
     required this.clients,
-    required this.distanceM,
     required this.count,
+    this.distanceM,
+    this.distanceSource = 'unknown',
+    this.distanceUncertaintyM,
+    this.targetDistanceM,
+    this.environment = 'indoor',
     this.payloadBytes = 0,
     this.intervalMs = 100,
     this.timeoutMs = 5000,
@@ -61,7 +65,11 @@ class TrialConfig {
   });
   final String scenarioId;
   final int clients;
-  final double distanceM;
+  final double? distanceM;
+  final String distanceSource;
+  final double? distanceUncertaintyM;
+  final double? targetDistanceM;
+  final String environment;
   final int count;
   final int payloadBytes;
   final int intervalMs;
@@ -74,6 +82,10 @@ class TrialConfig {
     'scenario_id': scenarioId,
     'clients': clients,
     'distance_m': distanceM,
+    'distance_source': distanceSource,
+    'distance_uncertainty_m': distanceUncertaintyM,
+    'target_distance_m': targetDistanceM,
+    'environment': environment,
     'count': count,
     'payload_bytes': payloadBytes,
     'interval_ms': intervalMs,
@@ -86,7 +98,11 @@ class TrialConfig {
   factory TrialConfig.fromJson(Map<String, Object?> data) => TrialConfig(
     scenarioId: data['scenario_id'] as String,
     clients: data['clients'] as int,
-    distanceM: (data['distance_m'] as num).toDouble(),
+    distanceM: (data['distance_m'] as num?)?.toDouble(),
+    distanceSource: data['distance_source'] as String? ?? 'unknown',
+    distanceUncertaintyM: (data['distance_uncertainty_m'] as num?)?.toDouble(),
+    targetDistanceM: (data['target_distance_m'] as num?)?.toDouble(),
+    environment: data['environment'] as String? ?? 'indoor',
     count: data['count'] as int,
     payloadBytes: data['payload_bytes'] as int? ?? 0,
     intervalMs: data['interval_ms'] as int? ?? 100,
@@ -94,6 +110,44 @@ class TrialConfig {
     warmup: data['warmup'] as int? ?? 3,
     protocol: data['protocol'] as String? ?? 'http',
     direction: data['direction'] as String? ?? 'download',
+  );
+
+  TrialConfig withDistance(
+    double? meters,
+    String source,
+    double? uncertaintyM,
+  ) => TrialConfig(
+    scenarioId: scenarioId,
+    clients: clients,
+    count: count,
+    distanceM: meters,
+    distanceSource: source,
+    distanceUncertaintyM: uncertaintyM,
+    targetDistanceM: targetDistanceM,
+    environment: environment,
+    payloadBytes: payloadBytes,
+    intervalMs: intervalMs,
+    timeoutMs: timeoutMs,
+    warmup: warmup,
+    protocol: protocol,
+    direction: direction,
+  );
+
+  TrialConfig withScenario(String id) => TrialConfig(
+    scenarioId: id,
+    clients: clients,
+    count: count,
+    distanceM: distanceM,
+    distanceSource: distanceSource,
+    distanceUncertaintyM: distanceUncertaintyM,
+    targetDistanceM: targetDistanceM,
+    environment: environment,
+    payloadBytes: payloadBytes,
+    intervalMs: intervalMs,
+    timeoutMs: timeoutMs,
+    warmup: warmup,
+    protocol: protocol,
+    direction: direction,
   );
 
   static List<TrialConfig> referenceScenarios({
@@ -104,10 +158,40 @@ class TrialConfig {
       TrialConfig(
         scenarioId: 'E${i + 1}',
         clients: i < 3 ? 1 : multiClients,
-        distanceM: [1.0, 6.0, 12.0][i % 3],
+        targetDistanceM: [1.0, 6.0, 12.0][i % 3],
         count: count,
       ),
   ];
+}
+
+class ScenarioTemplate {
+  const ScenarioTemplate({
+    required this.id,
+    required this.name,
+    required this.config,
+    required this.autoClients,
+  });
+  final String id;
+  final String name;
+  final TrialConfig config;
+  final bool autoClients;
+
+  Map<String, Object?> toJson() => {
+    'config': config.toJson(),
+    'auto_clients': autoClients,
+  };
+
+  factory ScenarioTemplate.fromRow(Map<String, Object?> row) {
+    final data = jsonDecode(row['data_json'] as String) as Map<String, Object?>;
+    return ScenarioTemplate(
+      id: row['id'] as String,
+      name: row['name'] as String,
+      config: TrialConfig.fromJson(
+        Map<String, Object?>.from(data['config'] as Map),
+      ),
+      autoClients: data['auto_clients'] as bool? ?? false,
+    );
+  }
 }
 
 class Measurement {
@@ -120,10 +204,14 @@ class Measurement {
     required this.requestId,
     required this.scenarioId,
     required this.clients,
-    required this.distanceM,
     required this.timestampUtc,
     required this.success,
     required this.bytesReceived,
+    this.distanceM,
+    this.distanceSource = 'unknown',
+    this.distanceUncertaintyM,
+    this.targetDistanceM,
+    this.environment = 'indoor',
     this.bytesSent = 0,
     this.latencyMs,
     this.jitterMs,
@@ -143,7 +231,11 @@ class Measurement {
   final String requestId;
   final String scenarioId;
   final int clients;
-  final double distanceM;
+  final double? distanceM;
+  final String distanceSource;
+  final double? distanceUncertaintyM;
+  final double? targetDistanceM;
+  final String environment;
   final DateTime timestampUtc;
   final bool success;
   final int bytesReceived;
@@ -171,6 +263,10 @@ class Measurement {
     'id_escenario': scenarioId,
     'clientes': clients,
     'distancia_m': distanceM,
+    'origen_distancia': distanceSource,
+    'incertidumbre_distancia_m': distanceUncertaintyM,
+    'distancia_objetivo_m': targetDistanceM,
+    'ambiente': environment,
     'rssi_dbm': rssiDbm,
     'latencia_ms': latencyMs,
     'jitter_ms': jitterMs,
@@ -219,7 +315,11 @@ class Measurement {
     requestId: row['request_id'] as String,
     scenarioId: row['scenario_id'] as String,
     clients: row['clients'] as int,
-    distanceM: (row['distance_m'] as num).toDouble(),
+    distanceM: (row['distance_m'] as num?)?.toDouble(),
+    distanceSource: row['distance_source'] as String? ?? 'legacy_unverified',
+    distanceUncertaintyM: (row['distance_uncertainty_m'] as num?)?.toDouble(),
+    targetDistanceM: (row['target_distance_m'] as num?)?.toDouble(),
+    environment: row['environment'] as String? ?? 'unknown',
     timestampUtc: DateTime.parse(row['timestamp_utc'] as String),
     success: (row['success'] as int) == 1,
     bytesReceived: row['bytes_received'] as int,

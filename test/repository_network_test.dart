@@ -10,6 +10,25 @@ import 'package:lanxis/network/tcp_transfer.dart';
 import 'package:lanxis/network/udp_echo.dart';
 
 void main() {
+  test('LAN discovery falls back to a verified HTTP health probe', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    server.listen((request) async {
+      request.response.headers.contentType = ContentType.json;
+      request.response.write(jsonEncode({'name': 'LANXIS', 'version': 1}));
+      await request.response.close();
+    });
+    final repo = LabRepository.inMemory();
+    addTearDown(repo.dispose);
+    final found = await NetworkLab(repo).discover(
+      duration: const Duration(milliseconds: 10),
+      target: InternetAddress('192.0.2.1'),
+      fallbackAddresses: [InternetAddress.loopbackIPv4],
+      fallbackPort: server.port,
+    );
+    expect(found.single.uri, Uri.parse('http://127.0.0.1:${server.port}'));
+  });
+
   test('client identity and result outbox survive reopening SQLite', () async {
     final directory = await Directory.systemTemp.createTemp('lanxis-outbox-');
     addTearDown(() => directory.delete(recursive: true));

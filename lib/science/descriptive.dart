@@ -203,12 +203,16 @@ class DescriptiveEngine {
   ) {
     final values = items.where((m) => !m.warmup).toList();
     final critical = values
-        .where((m) => !m.success || (m.latencyMs ?? 0) > 100)
+        .where(
+          (m) =>
+              m.distanceM != null && (!m.success || (m.latencyMs ?? 0) > 100),
+        )
         .toList();
     if (critical.isEmpty) return {};
     final counts = <double, int>{};
     for (final item in critical) {
-      counts[item.distanceM] = (counts[item.distanceM] ?? 0) + 1;
+      final distance = item.distanceM!;
+      counts[distance] = (counts[distance] ?? 0) + 1;
     }
     return counts.map((key, count) => MapEntry(key, count / critical.length));
   }

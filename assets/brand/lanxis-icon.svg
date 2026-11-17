@@ -1,28 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="LANXIS: campana de Gauss en un matraz geométrico">
-  <defs>
-    <linearGradient id="field" x1="0" x2="1" y1="0" y2="1">
-      <stop offset="0" stop-color="#102C48"/>
-      <stop offset="1" stop-color="#071626"/>
-    </linearGradient>
-    <linearGradient id="signal" x1="0" x2="1" y1="1" y2="0">
-      <stop offset="0" stop-color="#83D8C5"/>
-      <stop offset=".55" stop-color="#4AC7D6"/>
-      <stop offset="1" stop-color="#6987F0"/>
-    </linearGradient>
-  </defs>
-  <rect width="512" height="512" rx="124" fill="url(#field)"/>
-  <circle cx="256" cy="256" r="185" fill="none" stroke="#A7D9E7" stroke-opacity=".14" stroke-width="3"/>
-  <path d="M211 108h90M226 108v72l-99 164c-18 30 2 59 33 59h192c31 0 51-29 33-59l-99-164v-72" fill="none" stroke="#B9E6E9" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M150 360h212" stroke="#7CBCCA" stroke-width="5" stroke-opacity=".5"/>
-  <g fill="url(#signal)">
-    <rect x="164" y="324" width="12" height="30" rx="6" opacity=".48"/>
-    <rect x="187" y="296" width="12" height="58" rx="6" opacity=".58"/>
-    <rect x="210" y="257" width="12" height="97" rx="6" opacity=".72"/>
-    <rect x="233" y="226" width="12" height="128" rx="6" opacity=".85"/>
-    <rect x="256" y="216" width="12" height="138" rx="6"/>
-    <rect x="279" y="226" width="12" height="128" rx="6" opacity=".85"/>
-    <rect x="302" y="257" width="12" height="97" rx="6" opacity=".72"/>
-    <rect x="325" y="296" width="12" height="58" rx="6" opacity=".58"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="LANXIS: matraz con barras estadísticas">
+  <rect width="512" height="512" fill="#1C1E24"/>
+  <g fill="none" stroke="#BCE8EC" stroke-width="18" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M214 112h84"/>
+    <path d="M228 112v74l-91 158c-20 35 2 69 42 69h154c40 0 62-34 42-69l-91-158v-74"/>
   </g>
-  <path d="M150 345c51-4 68-128 112-128s61 124 100 128" fill="none" stroke="url(#signal)" stroke-width="11" stroke-linecap="round"/>
+  <g fill="#83D8C5">
+    <rect x="170" y="327" width="20" height="54" rx="10"/>
+    <rect x="207" y="287" width="20" height="94" rx="10"/>
+    <rect x="246" y="256" width="20" height="125" rx="10"/>
+    <rect x="285" y="287" width="20" height="94" rx="10"/>
+    <rect x="322" y="327" width="20" height="54" rx="10"/>
+  </g>
 </svg>

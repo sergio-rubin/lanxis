@@ -84,11 +84,11 @@ class ProbabilityEngine {
     Map<double, double> posterior,
   })
   criticalByDistance(Iterable<Measurement> input, {bool balanced = false}) {
-    final items = input.where((m) => !m.warmup).toList();
+    final items = input.where((m) => !m.warmup && m.distanceM != null).toList();
     if (items.isEmpty) throw ArgumentError('No hay observaciones');
     final groups = <double, List<Measurement>>{};
     for (final item in items) {
-      groups.putIfAbsent(item.distanceM, () => []).add(item);
+      groups.putIfAbsent(item.distanceM!, () => []).add(item);
     }
     final prior = <double, double>{};
     final conditional = <double, double>{};

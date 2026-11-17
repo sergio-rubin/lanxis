@@ -23,6 +23,13 @@ static void my_application_activate(GApplication* application) {
   GtkWindow* window =
       GTK_WINDOW(gtk_application_window_new(GTK_APPLICATION(application)));
   gtk_window_set_default_size(window, 1280, 720);
+  g_autofree gchar* executable_path = g_file_read_link("/proc/self/exe", nullptr);
+  if (executable_path != nullptr) {
+    g_autofree gchar* directory = g_path_get_dirname(executable_path);
+    g_autofree gchar* icon_path =
+        g_build_filename(directory, "data", "lanxis-icon.png", nullptr);
+    gtk_window_set_icon_from_file(window, icon_path, nullptr);
+  }
 
   // If you want to use a header bar, uncomment the following lines.
   // Header bars are commonly used in GNOME based desktop environments and
@@ -33,7 +40,7 @@ static void my_application_activate(GApplication* application) {
   // gtk_header_bar_set_show_close_button(header_bar, TRUE);
   // gtk_window_set_titlebar(window, GTK_WIDGET(header_bar));
 
-  gtk_window_set_title(window, "lanxis");
+  gtk_window_set_title(window, "LANXIS");
 
   g_autoptr(FlDartProject) project = fl_dart_project_new();
   fl_dart_project_set_dart_entrypoint_arguments(
