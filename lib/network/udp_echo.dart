@@ -2,6 +2,32 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+/// A zero return is temporary backpressure on non-blocking UDP sockets.
+/// UDP datagrams are atomic: a positive partial write is a real error.
+Future<int> _sendDatagram(
+  RawDatagramSocket socket,
+  List<int> bytes,
+  InternetAddress address,
+  int port,
+  Duration timeout, {
+  void Function()? beforeAttempt,
+}) async {
+  final elapsed = Stopwatch()..start();
+  final maxWait = Duration(milliseconds: timeout.inMilliseconds.clamp(1, 250));
+  while (true) {
+    beforeAttempt?.call();
+    final sent = socket.send(bytes, address, port);
+    if (sent == bytes.length) return sent;
+    if (sent != 0) {
+      throw StateError('El datagrama UDP se envió parcialmente');
+    }
+    if (elapsed.elapsed >= maxWait) {
+      throw TimeoutException('El socket UDP no quedó listo para enviar');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 2));
+  }
+}
+
 /// Echoes one authenticated, bounded datagram without amplifying its size.
 class UdpEchoServer {
   UdpEchoServer(this.code);
@@ -35,7 +61,15 @@ class UdpEchoServer {
               parts[2].length != 36) {
             continue;
           }
-          socket.send(bytes, packet.address, packet.port);
+          unawaited(
+            _sendDatagram(
+              socket,
+              bytes,
+              packet.address,
+              packet.port,
+              const Duration(milliseconds: 250),
+            ).catchError((Object _) => 0),
+          );
         } on FormatException {
           // Ignore unrelated or malformed local network datagrams.
         }
@@ -100,7 +134,7 @@ class UdpEchoClient {
       }
     });
     try {
-      final sent = socket.send(packet, address, port);
+      final sent = await _sendDatagram(socket, packet, address, port, timeout);
       onSent?.call(sent);
       if (sent != packet.length) {
         throw StateError('El datagrama UDP no se pudo enviar completo');
@@ -235,10 +269,18 @@ class UdpEchoClient {
     try {
       for (var index = 0; index < requestIds.length; index++) {
         if (cancelled?.call() ?? false) break;
-        sentAt[index] = stopwatch.elapsedMicroseconds;
-        sentUtc[index] = DateTime.now().toUtc();
-        sentCount++;
-        sentBytes[index] = socket.send(expected[index], address, port);
+        sentBytes[index] = await _sendDatagram(
+          socket,
+          expected[index],
+          address,
+          port,
+          timeout,
+          beforeAttempt: () {
+            sentAt[index] = stopwatch.elapsedMicroseconds;
+            sentUtc[index] = DateTime.now().toUtc();
+            sentCount = index + 1;
+          },
+        );
         if (sentBytes[index] != expected[index].length) {
           throw StateError(
             'El datagrama UDP $index no se pudo enviar completo',
