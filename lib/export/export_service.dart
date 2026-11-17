@@ -1,0 +1,771 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:archive/archive.dart';
+import 'package:crypto/crypto.dart';
+import 'package:file_selector/file_selector.dart';
+import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
+
+import '../data/lab_repository.dart';
+import '../core/models.dart';
+import '../science/descriptive.dart';
+import '../science/analysis_report.dart';
+import 'pdf_report.dart';
+
+class ExportScope {
+  const ExportScope({this.phaseId, this.testId, this.trialId, this.clientId});
+  final String? phaseId;
+  final String? testId;
+  final String? trialId;
+  final String? clientId;
+
+  bool matches(Measurement item) =>
+      (phaseId == null || item.phaseId == phaseId) &&
+      (testId == null || item.testId == testId) &&
+      (trialId == null || item.trialId == trialId) &&
+      (clientId == null || (item.clientId ?? 'Sin identificador') == clientId);
+
+  Map<String, Object?> toJson() => {
+    if (phaseId != null) 'phase_id': phaseId,
+    if (testId != null) 'test_id': testId,
+    if (trialId != null) 'trial_id': trialId,
+    if (clientId != null) 'client_id': clientId,
+  };
+}
+
+class ExportService {
+  const ExportService(this.repository);
+  final LabRepository repository;
+  static const appVersion = '0.1.0';
+  static const protocolVersion = 1;
+
+  List<Measurement> _items(
+    String sessionId,
+    ExportScope scope, {
+    bool includeWarmup = false,
+  }) => repository
+      .measurements(sessionId, includeWarmup: includeWarmup)
+      .where(scope.matches)
+      .toList();
+
+  static const legacyColumns = [
+    'id_escenario',
+    'clientes',
+    'distancia_m',
+    'rssi_dbm',
+    'latencia_ms',
+    'jitter_ms',
+    'velocidad_mbps',
+    'exito_sla',
+    'calidad_red',
+    'tipo_anomalia',
+  ];
+
+  String csv(
+    String sessionId, {
+    bool enriched = false,
+    ExportScope scope = const ExportScope(),
+  }) {
+    final items = _items(sessionId, scope);
+    final columns = enriched
+        ? [
+            ...legacyColumns,
+            'session_id',
+            'phase_id',
+            'test_id',
+            'trial_id',
+            'request_id',
+            'timestamp_utc',
+            'protocolo',
+            'bytes_recibidos',
+            'bytes_enviados',
+            'http_status',
+            'error',
+            'client_id',
+            'success',
+          ]
+        : legacyColumns;
+    final buffer = StringBuffer('${columns.join(',')}\r\n');
+    for (final item in items) {
+      final row = item.toJson();
+      buffer.writeln(columns.map((name) => _csvCell(row[name])).join(','));
+    }
+    return buffer.toString();
+  }
+
+  String analysisCsv(
+    String sessionId, {
+    ExportScope scope = const ExportScope(),
+  }) {
+    final report = AnalysisReport(_items(sessionId, scope));
+    final rows = [report.general, ...report.individual.values];
+    final exportedUtc = DateTime.now().toUtc().toIso8601String();
+    final buffer = StringBuffer(
+      'session_id,phase_id,test_id,trial_id,lanxis_version,protocolo_version,exported_utc,alcance,cliente_id,n_total,n_valid,n_failed,n_without_valid_rtt,media_ms,mediana_ms,p95_ms,sla,distancia_mediana_m,incertidumbre_max_m,interpretacion\r\n',
+    );
+    for (final (index, row) in rows.indexed) {
+      buffer.writeln(
+        [
+          sessionId,
+          scope.phaseId,
+          scope.testId,
+          scope.trialId,
+          appVersion,
+          protocolVersion,
+          exportedUtc,
+          index == 0 ? 'general' : 'individual',
+          index == 0 ? '' : row.label,
+          row.total,
+          row.valid,
+          row.failed,
+          row.withoutValidRtt,
+          row.stats.mean,
+          row.stats.median,
+          row.stats.p95,
+          row.sla,
+          row.medianDistanceM,
+          row.maxUncertaintyM,
+          row.interpretation,
+        ].map(_csvCell).join(','),
+      );
+    }
+    return buffer.toString();
+  }
+
+  String json(String sessionId, {ExportScope scope = const ExportScope()}) {
+    final session = repository.sessions().firstWhere((s) => s.id == sessionId);
+    final measurements = _items(sessionId, scope, includeWarmup: true);
+    final allTrials = repository.trialsForSession(sessionId);
+    final scopedTrialTestIds = scope.trialId == null
+        ? null
+        : allTrials
+              .where((trial) => trial['id'] == scope.trialId)
+              .map((trial) => trial['test_id'])
+              .toSet();
+    final tests = repository
+        .testsForSession(sessionId)
+        .where(
+          (t) =>
+              (scope.phaseId == null || t['phase_id'] == scope.phaseId) &&
+              (scope.testId == null || t['id'] == scope.testId) &&
+              (scopedTrialTestIds == null ||
+                  scopedTrialTestIds.contains(t['id'])),
+        )
+        .toList();
+    final phaseIds = tests.map((t) => t['phase_id']).toSet();
+    final phases = repository
+        .phases(sessionId)
+        .where(
+          (p) =>
+              (scope.phaseId == null || p.id == scope.phaseId) &&
+              ((scope.testId == null && scope.trialId == null) ||
+                  phaseIds.contains(p.id)),
+        )
+        .toList();
+    final testIds = tests.map((t) => t['id']).toSet();
+    final trials = allTrials
+        .where(
+          (t) =>
+              testIds.contains(t['test_id']) &&
+              (scope.trialId == null || t['id'] == scope.trialId),
+        )
+        .toList();
+    return const JsonEncoder.withIndent('  ').convert({
+      'format': 'LANXIS research export',
+      'format_version': 1,
+      'app_version': appVersion,
+      'protocol_version': protocolVersion,
+      'exported_utc': DateTime.now().toUtc().toIso8601String(),
+      'scope': scope.toJson(),
+      'session': {
+        'id': session.id,
+        'name': session.name,
+        'created_utc': session.createdAt.toIso8601String(),
+        'status': session.status,
+        'notes': session.notes,
+      },
+      'phases': phases
+          .map(
+            (p) => {
+              'id': p.id,
+              'session_id': p.sessionId,
+              'name': p.name,
+              'status': p.status,
+              'created_utc': p.createdAt.toIso8601String(),
+            },
+          )
+          .toList(),
+      'tests': tests,
+      'trials': trials,
+      'measurements': measurements.map((m) => m.toJson()).toList(),
+      'events': repository
+          .eventsForSession(sessionId)
+          .where(
+            (e) =>
+                (scope.phaseId == null || e['phase_id'] == scope.phaseId) &&
+                (scope.testId == null || e['test_id'] == scope.testId) &&
+                (scope.trialId == null || e['trial_id'] == scope.trialId),
+          )
+          .toList(),
+      'summary': _summary(sessionId, scope),
+      'analysis': AnalysisReport(_items(sessionId, scope)).toJson(),
+      'server_metrics': _serverMetrics(sessionId, scope),
+      'server_metrics_scope': 'whole_trial_all_clients',
+      'scope_notes': {
+        'measurements': 'Filtered by every requested scope field.',
+        'events':
+            'Trial context is retained; events are not filtered by client.',
+        'server_metrics': 'Whole selected trial; not attributed to one client.',
+      },
+      'definitions': {
+        'latency_ms': 'Application RTT for the recorded protocol using a local monotonic clock',
+        'jitter_ms': '|RTT_i - RTT_(i-1)| for consecutive valid observations',
+        'exito_sla': '1 only if successful and latency < 50 ms',
+        'warmup': 'Excluded from CSV and default analysis',
+        'distance_m': 'Recorded distance with source and uncertainty; BLE RSSI is an estimate, not a calibrated measurement',
+      },
+    });
+  }
+
+  Map<String, Object?> _summary(String sessionId, ExportScope scope) {
+    final items = _items(sessionId, scope);
+    final latency = items
+        .where((m) => m.success && m.latencyMs != null)
+        .map((m) => m.latencyMs!);
+    final stats = DescriptiveEngine.calculate(latency);
+    return {
+      'n_total': items.length,
+      'n_valid': stats.n,
+      'n_failed': items.where((m) => !m.success).length,
+      'mean_latency_ms': stats.mean,
+      'median_latency_ms': stats.median,
+      'sample_sd_ms': stats.standardDeviation,
+      'p95_latency_ms': stats.p95,
+      'sla_probability': DescriptiveEngine.successRate(items),
+      'method': 'Quartiles type 7; sample variance n-1; SLA strict < 50 ms',
+    };
+  }
+
+  List<Map<String, Object?>> _serverMetrics(
+    String sessionId,
+    ExportScope scope,
+  ) => repository
+      .eventsForSession(sessionId)
+      .where(
+        (e) =>
+            (e['type'] as String? ?? '').startsWith('coordinated_trial_') &&
+            e['type'] != 'coordinated_trial_started' &&
+            (scope.phaseId == null || e['phase_id'] == scope.phaseId) &&
+            (scope.testId == null || e['test_id'] == scope.testId) &&
+            (scope.trialId == null || e['trial_id'] == scope.trialId),
+      )
+      .map(
+        (e) => {
+          'trial_id': e['trial_id'],
+          'status': e['type'],
+          ...Map<String, Object?>.from(
+            jsonDecode(e['metadata_json'] as String) as Map,
+          ),
+        },
+      )
+      .toList();
+
+  String jsonl(String sessionId, {ExportScope scope = const ExportScope()}) {
+    final lines = <String>[
+      jsonEncode({
+        'type': 'manifest',
+        'format_version': 1,
+        'session_id': sessionId,
+        'scope': scope.toJson(),
+        'exported_utc': DateTime.now().toUtc().toIso8601String(),
+      }),
+      for (final item in _items(sessionId, scope, includeWarmup: true))
+        jsonEncode({'type': 'measurement', ...item.toJson()}),
+      for (final event
+          in repository
+              .eventsForSession(sessionId)
+              .where(
+                (e) =>
+                    (scope.phaseId == null || e['phase_id'] == scope.phaseId) &&
+                    (scope.testId == null || e['test_id'] == scope.testId) &&
+                    (scope.trialId == null || e['trial_id'] == scope.trialId),
+              ))
+        jsonEncode({'type': 'event', ...event}),
+    ];
+    return '${lines.join('\n')}\n';
+  }
+
+  String html(String sessionId, {ExportScope scope = const ExportScope()}) {
+    final session = repository.sessions().firstWhere((s) => s.id == sessionId);
+    final summary = _summary(sessionId, scope);
+    final items = _items(sessionId, scope);
+    final report = AnalysisReport(items);
+    final serverMetrics = _serverMetrics(sessionId, scope);
+    final bins = DescriptiveEngine.frequency(
+      items
+          .where((m) => m.success && m.latencyMs != null)
+          .map((m) => m.latencyMs!),
+    );
+    final maxCount = bins.isEmpty
+        ? 1
+        : bins.map((b) => b.frequency).reduce((a, b) => a > b ? a : b);
+    String cell(Object? value) => _escapeHtml(value?.toString() ?? '—');
+    return '''<!doctype html><html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LANXIS · ${cell(session.name)}</title><style>
+body{font-family:system-ui,sans-serif;max-width:900px;margin:auto;padding:2rem;background:#f3f8fb;color:#123042}
+h1,h2{letter-spacing:-.04em}section{background:white;border-radius:18px;padding:1.5rem;margin:1rem 0;box-shadow:0 8px 28px #153e5310}
+table{border-collapse:collapse;width:100%}td,th{padding:.6rem;border-bottom:1px solid #d9e5eb;text-align:left}
+svg{width:100%;height:auto}.muted{color:#587481}</style></head><body>
+<h1>LANXIS · ${cell(session.name)}</h1>
+<p class="muted">LANXIS $appVersion · Protocolo $protocolVersion · Sesión ${cell(session.id)} · Exportado ${DateTime.now().toUtc().toIso8601String()} UTC</p>
+<p class="muted">Alcance: ${cell(scope.toJson().isEmpty ? 'Sesión completa' : scope.toJson())}</p>
+<section><h2>Metodología</h2><p>RTT de aplicación del protocolo registrado (HTTP, TCP o UDP) con reloj monotónico local. Calentamientos excluidos del análisis. Fallos incluidos en el denominador del SLA. Cuartiles tipo 7, varianza muestral n−1 y criterio SLA estricto de latencia &lt; 50 ms.</p></section>
+<section><h2>Resultados</h2><table><tbody>
+${summary.entries.map((e) => '<tr><th>${cell(e.key)}</th><td>${cell(e.value)}</td></tr>').join()}
+</tbody></table></section>
+<section><h2>Interpretación general</h2><p>${cell(report.general.interpretation)}</p></section>
+<section><h2>Análisis por cliente</h2><table><thead><tr><th>Cliente</th><th>n</th><th>RTT medio</th><th>P95</th><th>SLA</th><th>Distancia mediana</th></tr></thead><tbody>
+${report.individual.entries.map((e) => '<tr><td>${cell(e.key)}</td><td>${e.value.total}</td><td>${cell(e.value.stats.mean)}</td><td>${cell(e.value.stats.p95)}</td><td>${cell(e.value.sla)}</td><td>${cell(e.value.medianDistanceM)}</td></tr>').join()}
+</tbody></table>${report.individual.entries.map((e) => '<h3>${cell(e.key)}</h3><p>${cell(e.value.interpretation)}</p>').join()}</section>
+<section><h2>Métricas del servidor</h2><p>Duración y carga útil contabilizadas por el servidor; memoria RSS al terminar. No incluyen cabeceras de transporte. Corresponden al ensayo completo con todos sus clientes, incluso cuando se filtra el análisis individual.</p><table><thead><tr><th>Ensayo</th><th>Estado</th><th>Duración ms</th><th>Muestras</th><th>Enviado B</th><th>Recibido B</th><th>RSS B</th></tr></thead><tbody>
+${serverMetrics.map((m) => '<tr><td>${cell(m['trial_id'])}</td><td>${cell(m['status'])}</td><td>${cell(m['server_elapsed_ms'])}</td><td>${cell(m['server_received_samples'])}</td><td>${cell(m['server_payload_sent_bytes'])}</td><td>${cell(m['server_payload_received_bytes'])}</td><td>${cell(m['server_rss_bytes_end'])}</td></tr>').join()}
+</tbody></table></section>
+<section><h2>Distribución de latencia</h2><svg viewBox="0 0 700 240" role="img" aria-label="Histograma de latencias">
+${[for (var i = 0; i < bins.length; i++) '<rect x="${45 + i * 90}" y="${200 - bins[i].frequency / maxCount * 170}" width="60" height="${bins[i].frequency / maxCount * 170}" fill="#3a8ca8" rx="5"/><text x="${55 + i * 90}" y="220" fill="#123042">${i + 1}</text>'].join()}
+</svg><p>Clases ordenadas de menor a mayor latencia. n válido: ${bins.fold<int>(0, (sum, b) => sum + b.frequency)}.</p></section>
+<section><h2>Limitaciones</h2><p>Las mediciones dependen del sistema operativo, hardware y carga del dispositivo. La distancia BLE por RSSI es aproximada y conserva su incertidumbre. Los clientes son participantes registrados; las muestras repetidas pueden estar correlacionadas. No infieras causalidad sin controlar factores de confusión.</p></section>
+</body></html>''';
+  }
+
+  static String _escapeHtml(String text) => text
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;');
+
+  Future<Uint8List> zip(
+    String sessionId, {
+    ExportScope scope = const ExportScope(),
+  }) async {
+    final csvBytes = utf8.encode(csv(sessionId, scope: scope));
+    final enrichedBytes = utf8.encode(
+      csv(sessionId, enriched: true, scope: scope),
+    );
+    final jsonBytes = utf8.encode(json(sessionId, scope: scope));
+    final jsonlBytes = utf8.encode(jsonl(sessionId, scope: scope));
+    final htmlBytes = utf8.encode(html(sessionId, scope: scope));
+    final xlsxBytes = xlsx(sessionId, scope: scope);
+    final pdfBytes = await pdf(sessionId, scope: scope);
+    final files = <String, List<int>>{
+      'datos_hotspot.csv': csvBytes,
+      'datos_enriquecidos.csv': enrichedBytes,
+      'analisis.csv': utf8.encode(analysisCsv(sessionId, scope: scope)),
+      'session.json': jsonBytes,
+      'records.jsonl': jsonlBytes,
+      'report.html': htmlBytes,
+      'workbook.xlsx': xlsxBytes,
+      'report.pdf': pdfBytes,
+    };
+    final manifest = jsonEncode({
+      'format': 'LANXIS research bundle',
+      'version': 1,
+      'app_version': appVersion,
+      'protocol_version': protocolVersion,
+      'session_id': sessionId,
+      'scope': scope.toJson(),
+      'server_metrics_scope': 'whole_trial_all_clients',
+      'created_utc': DateTime.now().toUtc().toIso8601String(),
+      'files': {
+        for (final entry in files.entries)
+          entry.key: {
+            'sha256': sha256.convert(entry.value).toString(),
+            'bytes': entry.value.length,
+          },
+      },
+    });
+    final archive = Archive();
+    for (final entry in files.entries) {
+      archive.addFile(ArchiveFile.bytes(entry.key, entry.value));
+    }
+    archive.addFile(ArchiveFile.string('manifest.json', manifest));
+    return ZipEncoder().encodeBytes(archive);
+  }
+
+  Uint8List xlsx(String sessionId, {ExportScope scope = const ExportScope()}) {
+    final measurements = _items(sessionId, scope);
+    final trialTestIds = scope.trialId == null
+        ? null
+        : repository
+              .trialsForSession(sessionId)
+              .where((trial) => trial['id'] == scope.trialId)
+              .map((trial) => trial['test_id'])
+              .toSet();
+    final tests = repository
+        .testsForSession(sessionId)
+        .where(
+          (t) =>
+              (scope.phaseId == null || t['phase_id'] == scope.phaseId) &&
+              (scope.testId == null || t['id'] == scope.testId) &&
+              (trialTestIds == null || trialTestIds.contains(t['id'])),
+        )
+        .toList();
+    final summary = _summary(sessionId, scope);
+    final report = AnalysisReport(measurements);
+    final frequencies = DescriptiveEngine.frequency(
+      measurements
+          .where((m) => m.success && m.latencyMs != null)
+          .map((m) => m.latencyMs!),
+    );
+    final sheets = <String, List<List<Object?>>>{
+      'Datos': [
+        [
+          ...legacyColumns,
+          'session_id',
+          'phase_id',
+          'test_id',
+          'trial_id',
+          'request_id',
+          'timestamp_utc',
+          'protocolo',
+          'bytes_recibidos',
+          'bytes_enviados',
+          'http_status',
+          'error',
+          'client_id',
+          'success',
+        ],
+        for (final m in measurements)
+          [
+            for (final column in [
+              ...legacyColumns,
+              'session_id',
+              'phase_id',
+              'test_id',
+              'trial_id',
+              'request_id',
+              'timestamp_utc',
+              'protocolo',
+              'bytes_recibidos',
+              'bytes_enviados',
+              'http_status',
+              'error',
+              'client_id',
+              'success',
+            ])
+              m.toJson()[column],
+          ],
+      ],
+      'Configuraciones': [
+        ['test_id', 'phase_id', 'name', 'config_json', 'created_utc'],
+        for (final row in tests)
+          [
+            for (final key in [
+              'id',
+              'phase_id',
+              'name',
+              'config_json',
+              'created_utc',
+            ])
+              row[key],
+          ],
+      ],
+      'Resultados': [
+        ['indicador', 'valor'],
+        for (final entry in summary.entries) [entry.key, entry.value],
+      ],
+      'Estadisticas': [
+        [
+          'limite_inferior_ms',
+          'limite_superior_ms',
+          'frecuencia',
+          'frecuencia_relativa',
+          'acumulada',
+        ],
+        for (final bin in frequencies)
+          [bin.lower, bin.upper, bin.frequency, bin.relative, bin.cumulative],
+      ],
+      'AnalisisClientes': [
+        [
+          'session_id',
+          'phase_id',
+          'test_id',
+          'trial_id',
+          'lanxis_version',
+          'protocolo_version',
+          'alcance',
+          'cliente_id',
+          'n_total',
+          'n_valid',
+          'n_failed',
+          'n_without_valid_rtt',
+          'media_ms',
+          'mediana_ms',
+          'p95_ms',
+          'sla',
+          'distancia_mediana_m',
+          'incertidumbre_max_m',
+          'interpretacion',
+        ],
+        for (final (index, row) in [
+          report.general,
+          ...report.individual.values,
+        ].indexed)
+          [
+            sessionId,
+            scope.phaseId,
+            scope.testId,
+            scope.trialId,
+            appVersion,
+            protocolVersion,
+            index == 0 ? 'general' : 'individual',
+            index == 0 ? '' : row.label,
+            row.total,
+            row.valid,
+            row.failed,
+            row.withoutValidRtt,
+            row.stats.mean,
+            row.stats.median,
+            row.stats.p95,
+            row.sla,
+            row.medianDistanceM,
+            row.maxUncertaintyM,
+            row.interpretation,
+          ],
+      ],
+      'Metadatos': [
+        ['campo', 'valor'],
+        ['session_id', sessionId],
+        ['lanxis_version', appVersion],
+        ['protocolo_version', protocolVersion],
+        ['exported_utc', DateTime.now().toUtc().toIso8601String()],
+        ['scope_json', jsonEncode(scope.toJson())],
+        ['server_metrics_scope', 'whole_trial_all_clients'],
+        ['latency_unit', 'ms'],
+        ['distance_unit', 'm'],
+        ['warmup_policy', 'excluded_from_default_analysis'],
+      ],
+    };
+    final archive = Archive();
+    void add(String name, String content) =>
+        archive.addFile(ArchiveFile.string(name, content));
+    add(
+      '[Content_Types].xml',
+      '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+${[for (var i = 1; i <= sheets.length; i++) '<Override PartName="/xl/worksheets/sheet$i.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'].join()}
+</Types>''',
+    );
+    add(
+      '_rels/.rels',
+      '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>''',
+    );
+    add(
+      'xl/workbook.xml',
+      '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheets>${[for (var i = 0; i < sheets.length; i++) '<sheet name="${_escapeXml(sheets.keys.elementAt(i))}" sheetId="${i + 1}" r:id="rId${i + 1}"/>'].join()}</sheets>
+</workbook>''',
+    );
+    add(
+      'xl/_rels/workbook.xml.rels',
+      '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+${[for (var i = 1; i <= sheets.length; i++) '<Relationship Id="rId$i" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet$i.xml"/>'].join()}
+<Relationship Id="rId${sheets.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>''',
+    );
+    add(
+      'xl/styles.xml',
+      '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Aptos"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs></styleSheet>''',
+    );
+    for (var i = 0; i < sheets.length; i++) {
+      final rows = sheets.values.elementAt(i);
+      add(
+        'xl/worksheets/sheet${i + 1}.xml',
+        '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+${[
+          for (var r = 0; r < rows.length; r++) '<row r="${r + 1}">${[for (var c = 0; c < rows[r].length; c++) _xlsxCell(c, r, rows[r][c])].join()}</row>',
+        ].join()}
+</sheetData></worksheet>''',
+      );
+    }
+    return ZipEncoder().encodeBytes(archive);
+  }
+
+  static String _xlsxCell(int column, int row, Object? value) {
+    if (value == null) return '';
+    var n = column + 1;
+    var letter = '';
+    while (n > 0) {
+      n--;
+      letter = String.fromCharCode(65 + n % 26) + letter;
+      n ~/= 26;
+    }
+    final ref = '$letter${row + 1}';
+    if (value is num && value.isFinite) {
+      return '<c r="$ref"><v>$value</v></c>';
+    }
+    return '<c r="$ref" t="inlineStr"><is><t>${_escapeXml(value.toString())}</t></is></c>';
+  }
+
+  static String _escapeXml(String text) =>
+      _escapeHtml(text).replaceAll("'", '&apos;');
+
+  Future<Uint8List> pdf(
+    String sessionId, {
+    ExportScope scope = const ExportScope(),
+  }) async {
+    final session = repository.sessions().firstWhere((s) => s.id == sessionId);
+    final trialTestId = scope.trialId == null
+        ? null
+        : repository
+                  .trialsForSession(sessionId)
+                  .where((trial) => trial['id'] == scope.trialId)
+                  .firstOrNull?['test_id']
+              as String?;
+    final conditions = <List<String>>[];
+    for (final test in repository.testsForSession(sessionId)) {
+      if ((scope.phaseId != null && test['phase_id'] != scope.phaseId) ||
+          (scope.testId != null && test['id'] != scope.testId) ||
+          (trialTestId != null && test['id'] != trialTestId)) {
+        continue;
+      }
+      final config = TrialConfig.fromJson(
+        Map<String, Object?>.from(
+          jsonDecode(test['config_json'] as String) as Map,
+        ),
+      );
+      conditions.add([
+        config.scenarioId,
+        '${config.clients}',
+        '${config.count}',
+        '${config.payloadBytes}',
+        '${config.protocol.toUpperCase()} / ${config.direction == 'download' ? 'descarga' : 'subida'}',
+        config.environment == 'indoor'
+            ? 'Cerrado'
+            : config.environment == 'outdoor'
+            ? 'Abierto'
+            : config.environment,
+        config.targetDistanceM?.toStringAsFixed(2) ?? '—',
+      ]);
+    }
+    return PdfReportBuilder.build(
+      session: session,
+      scopeLabel: scope.toJson().isEmpty
+          ? 'Sesión completa'
+          : '${scope.toJson()}',
+      items: _items(sessionId, scope),
+      conditions: conditions,
+      serverMetrics: _serverMetrics(sessionId, scope),
+      appVersion: appVersion,
+      protocolVersion: protocolVersion,
+      clientScoped: scope.clientId != null,
+    );
+  }
+
+  static String _csvCell(Object? value) {
+    if (value == null) return '';
+    final text = value.toString();
+    if (!text.contains(RegExp('[,"\r\n]'))) return text;
+    return '"${text.replaceAll('"', '""')}"';
+  }
+
+  Future<String?> save(
+    String sessionId, {
+    required String format,
+    bool enriched = false,
+    bool analysis = false,
+    ExportScope scope = const ExportScope(),
+  }) async {
+    if (!{
+      'csv',
+      'json',
+      'jsonl',
+      'html',
+      'zip',
+      'pdf',
+      'xlsx',
+    }.contains(format)) {
+      throw ArgumentError.value(format);
+    }
+    final extension = format;
+    final suggestedName = format == 'csv'
+        ? (analysis
+              ? 'analisis_lanxis.csv'
+              : enriched
+              ? 'datos_enriquecidos.csv'
+              : 'datos_hotspot.csv')
+        : 'lanxis_session.$extension';
+    final content = switch (format) {
+      'csv' => utf8.encode(
+        analysis
+            ? analysisCsv(sessionId, scope: scope)
+            : csv(sessionId, enriched: enriched, scope: scope),
+      ),
+      'json' => utf8.encode(json(sessionId, scope: scope)),
+      'jsonl' => utf8.encode(jsonl(sessionId, scope: scope)),
+      'html' => utf8.encode(html(sessionId, scope: scope)),
+      'zip' => await zip(sessionId, scope: scope),
+      'xlsx' => xlsx(sessionId, scope: scope),
+      'pdf' => await pdf(sessionId, scope: scope),
+      _ => throw ArgumentError.value(format),
+    };
+    final mime = switch (format) {
+      'csv' => 'text/csv',
+      'json' => 'application/json',
+      'jsonl' => 'application/x-ndjson',
+      'html' => 'text/html',
+      'zip' => 'application/zip',
+      'xlsx' =>
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'pdf' => 'application/pdf',
+      _ => 'application/octet-stream',
+    };
+    String? savedLocation;
+    if (Platform.isAndroid) {
+      final directory = await getTemporaryDirectory();
+      final temporary = File(
+        '${directory.path}/lanxis-export-${DateTime.now().microsecondsSinceEpoch}.$extension',
+      );
+      try {
+        await temporary.writeAsBytes(content, flush: true);
+        savedLocation = await const MethodChannel('mx.lanxis/export')
+            .invokeMethod<String>('saveDocument', {
+              'name': suggestedName,
+              'mime': mime,
+              'path': temporary.path,
+            });
+      } finally {
+        if (await temporary.exists()) await temporary.delete();
+      }
+    } else {
+      final location = await getSaveLocation(
+        suggestedName: suggestedName,
+        acceptedTypeGroups: [
+          XTypeGroup(label: format.toUpperCase(), extensions: [extension]),
+        ],
+      );
+      if (location == null) return null;
+      await XFile.fromData(content, mimeType: mime).saveTo(location.path);
+      savedLocation = location.path;
+    }
+    if (savedLocation == null) return null;
+    repository.addEvent(
+      'export_$format',
+      sessionId: sessionId,
+      metadataJson: jsonEncode({'enriched': enriched, 'scope': scope.toJson()}),
+    );
+    return savedLocation;
+  }
+}

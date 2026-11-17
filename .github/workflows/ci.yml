@@ -1,0 +1,104 @@
+name: Native builds
+
+on:
+  push:
+    branches: [main, 'feature/**', 'update/**']
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: subosito/flutter-action@v2.23.0
+        with:
+          flutter-version: '3.50.0'
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: dart format --output=none --set-exit-if-changed lib test
+      - run: flutter analyze
+      - run: flutter test
+
+  linux:
+    needs: analyze
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
+      - uses: subosito/flutter-action@v2.23.0
+        with:
+          flutter-version: '3.50.0'
+          channel: stable
+          cache: true
+      - run: flutter config --enable-linux-desktop
+      - run: flutter pub get
+      - run: flutter build linux --release
+      - run: tar -C build/linux/x64/release/bundle -czf lanxis-linux-x64.tar.gz .
+      - run: sha256sum lanxis-linux-x64.tar.gz > lanxis-linux-x64.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: lanxis-linux-x64
+          path: |
+            lanxis-linux-x64.tar.gz
+            lanxis-linux-x64.sha256
+
+  android:
+    needs: analyze
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: subosito/flutter-action@v2.23.0
+        with:
+          flutter-version: '3.50.0'
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - name: Build Android APKs
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if flutter build apk --release --split-per-abi; then exit 0; fi
+            if [ "$attempt" -eq 3 ]; then exit 1; fi
+            sleep 15
+          done
+      - run: sha256sum build/app/outputs/flutter-apk/*.apk > android.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: lanxis-android-test-signed
+          path: |
+            build/app/outputs/flutter-apk/*.apk
+            android.sha256
+
+  windows:
+    needs: analyze
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: subosito/flutter-action@v2.23.0
+        with:
+          flutter-version: '3.50.0'
+          channel: stable
+          cache: true
+      - run: flutter config --enable-windows-desktop
+      - run: flutter pub get
+      - run: flutter test test/repository_network_test.dart test/export_test.dart test/science_test.dart test/inference_test.dart test/modeling_test.dart
+      - run: flutter build windows --release
+      - shell: pwsh
+        run: |
+          Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath lanxis-windows-x64.zip
+          (Get-FileHash lanxis-windows-x64.zip -Algorithm SHA256).Hash + '  lanxis-windows-x64.zip' | Set-Content lanxis-windows-x64.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: lanxis-windows-x64
+          path: |
+            lanxis-windows-x64.zip
+            lanxis-windows-x64.sha256

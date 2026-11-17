@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="LANXIS: matraz con barras estadísticas">
+  <rect width="512" height="512" fill="#1C1E24"/>
+  <g fill="none" stroke="#BCE8EC" stroke-width="18" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M214 112h84"/>
+    <path d="M228 112v74l-91 158c-20 35 2 69 42 69h154c40 0 62-34 42-69l-91-158v-74"/>
+  </g>
+  <g fill="#83D8C5">
+    <rect x="170" y="327" width="20" height="54" rx="10"/>
+    <rect x="207" y="287" width="20" height="94" rx="10"/>
+    <rect x="246" y="256" width="20" height="125" rx="10"/>
+    <rect x="285" y="287" width="20" height="94" rx="10"/>
+    <rect x="322" y="327" width="20" height="54" rx="10"/>
+  </g>
+</svg>
