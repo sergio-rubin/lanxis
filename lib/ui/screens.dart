@@ -2939,6 +2939,15 @@ class AboutScreen extends StatelessWidget {
                     icon: const Icon(Icons.open_in_new),
                     label: const Text('Leer la licencia'),
                   ),
+                  TextButton.icon(
+                    onPressed: () => showLicensePage(
+                      context: context,
+                      applicationName: 'LANXIS',
+                      applicationVersion: '0.1.0',
+                    ),
+                    icon: const Icon(Icons.article_outlined),
+                    label: const Text('Licencias de componentes'),
+                  ),
                 ],
               ),
             ),
