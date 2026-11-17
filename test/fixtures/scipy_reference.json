@@ -1,0 +1,25 @@
+{
+  "generator": "tools/generate_scipy_reference.py",
+  "scipy_version": "1.18.1",
+  "numpy_version": "2.5.5",
+  "binomial_pmf_20_5_p02": 0.17455952155688056,
+  "binomial_cdf_20_5_p02": 0.8042077854595493,
+  "poisson_cdf_k2_lambda3": 0.42319008112684364,
+  "student_cdf_t183_df9": 0.9497521949764668,
+  "chi_square_cdf_x132_df6": 0.9600323870568429,
+  "normal_area_20_50_mu32_sd12": 0.7745375447996848,
+  "exponential_cdf_x34_rate07": 0.9074494224896568,
+  "mean_ci95_sample": [
+    5.586032429268011,
+    12.01396757073199
+  ],
+  "wilson_ci95_7_of_20": [
+    0.1811918241010821,
+    0.5671457233147637
+  ],
+  "welch_greater_statistic": 11.0,
+  "welch_greater_pvalue": 2.074422100190158e-06,
+  "variance_greater_statistic": 6.699999999999999,
+  "variance_greater_pvalue": 0.15261694033867584,
+  "exact_proportion_greater_4_of_10_p01": 0.0127951984
+}

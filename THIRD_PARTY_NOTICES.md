@@ -23,3 +23,16 @@ Dependencias directas verificadas en el caché de `pub.dev` el 16 de noviembre d
 | `dbus` | 0.8.0 | MPL-2.0 |
 
 Los textos completos de dependencias transitivas se encuentran en sus paquetes, fijados en `pubspec.lock`; la distribución binaria debe incluir el listado de licencias generado por Flutter.
+
+La herramienta opcional `tools/verify_export.py` y el generador de referencias
+usan paquetes Python que **no se incluyen ni se ejecutan en la aplicación**:
+
+| Paquete | Licencia del proyecto | Texto oficial |
+| --- | --- | --- |
+| NumPy | BSD-3-Clause | [LICENSE.txt](https://github.com/numpy/numpy/blob/main/LICENSE.txt) |
+| pandas | BSD-3-Clause | [LICENSE](https://github.com/pandas-dev/pandas/blob/main/LICENSE) |
+| SciPy | BSD-3-Clause | [LICENSE.txt](https://github.com/scipy/scipy/blob/main/LICENSE.txt) |
+| Matplotlib | Acuerdo de licencia de Matplotlib, basado en PSF | [LICENSE](https://github.com/matplotlib/matplotlib/blob/main/LICENSE/LICENSE) |
+
+Quien redistribuya los paquetes Python instalados debe conservar además los
+avisos de los componentes incluidos en cada paquete o rueda binaria.

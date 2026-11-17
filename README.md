@@ -25,6 +25,8 @@ La distancia real no se exige para iniciar. Un servidor Android o Linux con Blue
 
 En **Análisis** se puede filtrar por sesión, fase, prueba y ensayo, y explorar distribuciones teóricas con parámetros propios. La selección puede exportarse como CSV, JSON, XLSX, PDF o ZIP; el ZIP incluye manifiesto y hashes SHA-256. En **Red local**, las transferencias HTTP y TCP de descarga y subida usan bloques reproducibles con verificación de integridad; el eco UDP mide respuesta o ausencia de respuesta por datagrama. Los participantes coordinados conservan lotes de resultados pendientes en SQLite hasta recibir confirmación.
 
+Para revisar una exportación con NumPy, SciPy, Pandas y Matplotlib sin modificar la app, consulte [REPRODUCIBILITY.md](REPRODUCIBILITY.md) y la utilidad opcional `tools/verify_export.py`.
+
 Para una prueba entre dispositivos: en el equipo servidor, abre **Red local → Ofrecer servidor** y comparte la dirección y el código; en el cliente, usa **Conectar servidor → Conectar y comprobar**. Después crea o selecciona una sesión y una fase, revisa la vista previa del escenario y pulsa **Iniciar ensayo**. Para E4–E6, los clientes deben activar **Participar en ensayo de otro dispositivo** y el servidor muestra cuántos están listos.
 
 ## Licencia
