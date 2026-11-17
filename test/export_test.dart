@@ -62,6 +62,53 @@ void main() {
     expect(bytes.length, greaterThan(1000));
   });
 
+  test('PDF charts handle zero RTT for multiple clients', () async {
+    final repo = LabRepository.inMemory();
+    addTearDown(repo.dispose);
+    final session = repo.createSession('RTT cero');
+    final phase = repo.createPhase(session.id, 'Fase');
+    final testId = repo.createTest(
+      phase.id,
+      'E4',
+      const TrialConfig(
+        scenarioId: 'E4',
+        clients: 2,
+        distanceM: null,
+        count: 1,
+      ),
+    );
+    final trialId = repo.startTrial(testId);
+    for (final id in ['a', 'b']) {
+      repo.addMeasurement(
+        Measurement(
+          id: 'm-$id',
+          sessionId: session.id,
+          phaseId: phase.id,
+          testId: testId,
+          trialId: trialId,
+          requestId: 'r-$id',
+          scenarioId: 'E4',
+          clients: 2,
+          distanceM: null,
+          timestampUtc: DateTime.utc(2026),
+          success: true,
+          bytesReceived: 0,
+          latencyMs: 0,
+          clientId: id,
+        ),
+      );
+    }
+    final service = ExportService(repo);
+    expect((await service.pdf(session.id)).take(4), [37, 80, 68, 70]);
+    expect(
+      (await service.pdf(
+        session.id,
+        scope: const ExportScope(clientId: 'a'),
+      )).take(4),
+      [37, 80, 68, 70],
+    );
+  });
+
   test('phase export contains only its measurements and metadata', () async {
     final repo = LabRepository.inMemory();
     addTearDown(repo.dispose);

@@ -5,14 +5,13 @@ import 'package:archive/archive.dart';
 import 'package:crypto/crypto.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/services.dart';
-import 'package:pdf/pdf.dart';
-import 'package:pdf/widgets.dart' as pw;
 import 'package:path_provider/path_provider.dart';
 
 import '../data/lab_repository.dart';
 import '../core/models.dart';
 import '../science/descriptive.dart';
 import '../science/analysis_report.dart';
+import 'pdf_report.dart';
 
 class ExportScope {
   const ExportScope({this.phaseId, this.testId, this.trialId, this.clientId});
@@ -628,12 +627,6 @@ ${[
     ExportScope scope = const ExportScope(),
   }) async {
     final session = repository.sessions().firstWhere((s) => s.id == sessionId);
-    final report = AnalysisReport(_items(sessionId, scope));
-    final serverMetrics = _serverMetrics(sessionId, scope);
-    String milliseconds(num? value) =>
-        value == null ? '—' : '${value.toStringAsFixed(2)} ms';
-    String percentage(num? value) =>
-        value == null ? '—' : '${(value * 100).toStringAsFixed(1)} %';
     final trialTestId = scope.trialId == null
         ? null
         : repository
@@ -658,209 +651,26 @@ ${[
         '${config.clients}',
         '${config.count}',
         '${config.payloadBytes}',
-        '${config.protocol}/${config.direction}',
-        config.environment,
+        '${config.protocol.toUpperCase()} / ${config.direction == 'download' ? 'descarga' : 'subida'}',
+        config.environment == 'indoor'
+            ? 'Cerrado'
+            : config.environment == 'outdoor'
+            ? 'Abierto'
+            : config.environment,
         config.targetDistanceM?.toStringAsFixed(2) ?? '—',
       ]);
     }
-    final bins = DescriptiveEngine.frequency(
-      _items(
-        sessionId,
-        scope,
-      ).where((m) => m.success && m.latencyMs != null).map((m) => m.latencyMs!),
-    );
-    final fontData = await rootBundle.load('assets/fonts/Manrope.ttf');
-    final font = pw.Font.ttf(fontData);
-    final document = pw.Document();
-    document.addPage(
-      pw.MultiPage(
-        pageFormat: PdfPageFormat.a4,
-        maxPages: 200,
-        theme: pw.ThemeData.withFont(base: font, bold: font),
-        build: (_) => [
-          pw.Text(
-            'LANXIS',
-            style: pw.TextStyle(fontSize: 28, color: PdfColors.blueGrey900),
-          ),
-          pw.SizedBox(height: 8),
-          pw.Text(session.name, style: const pw.TextStyle(fontSize: 19)),
-          pw.Text(
-            'LANXIS $appVersion · Protocolo $protocolVersion · Sesión ${session.id} · ${DateTime.now().toUtc().toIso8601String()} UTC',
-          ),
-          pw.Text(
-            'Alcance: ${scope.toJson().isEmpty ? 'Sesión completa' : scope.toJson()}',
-          ),
-          pw.SizedBox(height: 20),
-          pw.Header(level: 1, text: 'Metodología'),
-          pw.Text(
-            'RTT de aplicación del protocolo registrado (HTTP, TCP o UDP) medido con reloj monotónico. Muestras de calentamiento excluidas. Fallos conservados para SLA. Cuartiles tipo 7; varianza muestral n−1; SLA estricto menor que 50 ms.',
-          ),
-          pw.Header(level: 1, text: 'Condiciones experimentales'),
-          if (conditions.isEmpty)
-            pw.Text('No hay pruebas configuradas en esta selección.')
-          else
-            pw.TableHelper.fromTextArray(
-              headers: [
-                'Escenario',
-                'Clientes',
-                'n/cliente',
-                'Carga B',
-                'Protocolo',
-                'Ambiente',
-                'Objetivo m',
-              ],
-              data: conditions,
-            ),
-          pw.Header(level: 1, text: 'Resumen de resultados'),
-          pw.TableHelper.fromTextArray(
-            headers: ['Indicador', 'Valor'],
-            data: [
-              ['Observaciones', '${report.general.total}'],
-              ['RTT válidos', '${report.general.valid}'],
-              ['Fallos', '${report.general.failed}'],
-              ['RTT medio', milliseconds(report.general.stats.mean)],
-              ['Mediana', milliseconds(report.general.stats.median)],
-              ['P95', milliseconds(report.general.stats.p95)],
-              [
-                'Desviación estándar',
-                milliseconds(report.general.stats.standardDeviation),
-              ],
-              ['SLA < 50 ms', percentage(report.general.sla)],
-            ],
-          ),
-          pw.Header(level: 1, text: 'Interpretación general'),
-          pw.Text(report.general.interpretation),
-          pw.Header(level: 1, text: 'Análisis individual por cliente'),
-          pw.TableHelper.fromTextArray(
-            headers: [
-              'Cliente',
-              'n',
-              'RTT medio ms',
-              'P95 ms',
-              'SLA',
-              'Distancia m',
-            ],
-            data: [
-              for (final entry in report.individual.entries)
-                [
-                  entry.key,
-                  '${entry.value.total}',
-                  milliseconds(entry.value.stats.mean),
-                  milliseconds(entry.value.stats.p95),
-                  percentage(entry.value.sla),
-                  entry.value.medianDistanceM?.toStringAsFixed(2) ?? '—',
-                ],
-            ],
-          ),
-          for (final entry in report.individual.entries) ...[
-            pw.Header(level: 2, text: 'Cliente ${entry.key}'),
-            pw.Text(entry.value.interpretation),
-          ],
-          pw.Inseparable(
-            child: pw.Column(
-              crossAxisAlignment: pw.CrossAxisAlignment.start,
-              children: [
-                pw.Header(level: 1, text: 'Distribución de latencia'),
-                if (bins.isEmpty)
-                  pw.Text('Sin RTT válido para dibujar la distribución.')
-                else ...[
-                  pw.Text(
-                    'Histograma vectorial de ${bins.fold<int>(0, (sum, bin) => sum + bin.frequency)} respuestas válidas. Clases ordenadas de menor a mayor RTT.',
-                  ),
-                  pw.SizedBox(height: 10),
-                  _pdfHistogram(bins),
-                  pw.SizedBox(height: 10),
-                  pw.TableHelper.fromTextArray(
-                    headers: ['Clase', 'Intervalo RTT ms', 'fi', 'fr %'],
-                    data: [
-                      for (final (index, bin) in bins.indexed)
-                        [
-                          '${index + 1}',
-                          '[${bin.lower.toStringAsFixed(2)}, ${bin.upper.toStringAsFixed(2)}${index == bins.length - 1 ? ']' : ')'}',
-                          '${bin.frequency}',
-                          (bin.relative * 100).toStringAsFixed(1),
-                        ],
-                    ],
-                  ),
-                ],
-              ],
-            ),
-          ),
-          pw.Header(level: 1, text: 'Métricas del servidor'),
-          pw.Text(
-            'Duración del ensayo, muestras recibidas, carga útil enviada y recibida, y memoria RSS al finalizar. No incluyen cabeceras de transporte.',
-          ),
-          if (scope.clientId != null)
-            pw.Text(
-              'Estas métricas corresponden al ensayo completo con todos sus clientes; no se atribuyen únicamente al cliente ${scope.clientId}.',
-            ),
-          if (serverMetrics.isEmpty)
-            pw.Text('No hay ensayos coordinados en esta selección.')
-          else
-            pw.TableHelper.fromTextArray(
-              headers: [
-                'Ensayo',
-                'Duración ms',
-                'Muestras',
-                'Enviado B',
-                'Recibido B',
-              ],
-              data: [
-                for (final metric in serverMetrics)
-                  [
-                    '${metric['trial_id']}',
-                    '${metric['server_elapsed_ms'] ?? '—'}',
-                    '${metric['server_received_samples'] ?? '—'}',
-                    '${metric['server_payload_sent_bytes'] ?? '—'}',
-                    '${metric['server_payload_received_bytes'] ?? '—'}',
-                  ],
-              ],
-            ),
-          pw.Header(level: 1, text: 'Limitaciones'),
-          pw.Text(
-            'La carga, el sistema operativo y el entorno radioeléctrico afectan los resultados. La distancia BLE por RSSI es aproximada y se muestra con incertidumbre. Las muestras repetidas pueden estar correlacionadas; estos resultados no demuestran causalidad.',
-          ),
-        ],
-      ),
-    );
-    return document.save();
-  }
-
-  static pw.Widget _pdfHistogram(List<FrequencyClass> bins) {
-    final highest = bins
-        .map((bin) => bin.frequency)
-        .reduce((a, b) => a > b ? a : b);
-    return pw.CustomPaint(
-      size: const PdfPoint(480, 150),
-      painter: (canvas, size) {
-        const left = 24.0;
-        const bottom = 18.0;
-        const top = 10.0;
-        const right = 8.0;
-        final plotWidth = size.x - left - right;
-        final plotHeight = size.y - top - bottom;
-        canvas
-          ..setStrokeColor(PdfColors.blueGrey400)
-          ..setLineWidth(1)
-          ..moveTo(left, bottom + plotHeight)
-          ..lineTo(left, bottom)
-          ..lineTo(left + plotWidth, bottom)
-          ..strokePath();
-        final step = plotWidth / bins.length;
-        for (var i = 0; i < bins.length; i++) {
-          final barWidth = step * .65;
-          final barHeight = bins[i].frequency / highest * plotHeight;
-          canvas
-            ..setFillColor(const PdfColor(.23, .55, .66))
-            ..drawRect(
-              left + i * step + (step - barWidth) / 2,
-              bottom,
-              barWidth,
-              barHeight,
-            )
-            ..fillPath();
-        }
-      },
+    return PdfReportBuilder.build(
+      session: session,
+      scopeLabel: scope.toJson().isEmpty
+          ? 'Sesión completa'
+          : '${scope.toJson()}',
+      items: _items(sessionId, scope),
+      conditions: conditions,
+      serverMetrics: _serverMetrics(sessionId, scope),
+      appVersion: appVersion,
+      protocolVersion: protocolVersion,
+      clientScoped: scope.clientId != null,
     );
   }
 
