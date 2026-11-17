@@ -4,7 +4,7 @@ Fuente: prompt maestro del proyecto y «Proyecto Final - Servidor Hotspot (Reque
 
 | ID | Requisito | Evidencia esperada | Estado |
 | --- | --- | --- | --- |
-| P1 | Proyecto Flutter Android, Windows y Linux | `flutter analyze`, builds por plataforma | APK Android con build 4016 (versionCode ARM64 6016) y bundle Linux compilados; análisis y suite completos en verde; el cambio actual requiere nuevo CI; Windows sin prueba manual |
+| P1 | Proyecto Flutter Android, Windows y Linux | `flutter analyze`, builds por plataforma | APK Android con build 4016 (versionCode ARM64 6016) y bundle Linux compilados; análisis, suite y builds Android/Linux/Windows en CI aprobados; Windows sin prueba manual |
 | N1 | Servidor y cliente LAN sin Internet, protocolo versionado | Prueba entre procesos y dispositivos | Android servidor → Linux cliente: 35 mediciones reales HTTP/TCP/UDP sin fallo; Linux servidor → Android cliente: conexión por descubrimiento y ensayo E1 5/5; Windows físico pendiente |
 | N2 | Descubrimiento, emparejamiento y control de capacidad | Prueba en LAN y escenarios de permiso denegado | Búsqueda con UDP y respaldo HTTP encontró Linux desde Android 16; mDNS/DNS-SD anunció el Xiaomi y fue resuelto por Avahi/Bonsoir en Linux, y Android encontró el servidor Linux por mDNS solo en puerto 8050; selección, código y registro confirmados con 1 cliente; permisos denegados y otras redes pendientes |
 | N3 | Hotspot según capacidad real del sistema | Pruebas en hardware Android, Windows y Linux | Adaptadores Android/Linux y QR Wi-Fi de SSID/clave implementados; QR probado con caracteres reservados; generación y conexión física pendientes |
