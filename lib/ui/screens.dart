@@ -1414,10 +1414,34 @@ class _NetworkScreenState extends State<NetworkScreen>
         config: config,
       );
       if (!mounted) return;
+      if (widget.network.lastCoordinatedStatus == 'cancelled') {
+        setState(
+          () => feedback =
+              'Ensayo cancelado. Se conservaron $actual mediciones recibidas.',
+        );
+        widget.onChanged();
+        return;
+      }
+      final measured = widget.network.lastServerDistances.values
+          .where((observation) => observation.meters != null)
+          .toList();
+      final missingReason = widget.network.lastServerDistances.values
+          .where((observation) => observation.meters == null)
+          .map((observation) => observation.reason)
+          .whereType<String>()
+          .firstOrNull;
+      final distanceMessage = measured.isEmpty
+          ? config.distanceM != null
+                ? 'Distancia registrada: ${config.distanceM!.toStringAsFixed(2)} m.'
+                : 'Distancia sin dato. ${missingReason ?? 'Ninguna baliza produjo una lectura válida.'}'
+          : measured.length == 1 && config.clients == 1
+          ? 'Distancia estimada: ${measured.first.meters!.toStringAsFixed(2)} m ±${measured.first.uncertaintyM?.toStringAsFixed(2) ?? '—'} m.'
+          : 'Distancia estimada para ${measured.length}/${config.clients} clientes; abre Análisis para ver cada valor e incertidumbre.${missingReason == null ? '' : ' Sin dato: $missingReason'}';
       setState(
         () => feedback =
             'Ensayo coordinado: $actual/${config.count * config.clients} '
-            'mediciones recibidas de ${config.clients} dispositivos.',
+            'mediciones recibidas de ${config.clients} dispositivos. '
+            '$distanceMessage',
       );
       widget.onChanged();
     } catch (error) {
@@ -2486,15 +2510,30 @@ class _NetworkScreenState extends State<NetworkScreen>
                                 : const Icon(Icons.play_arrow_rounded),
                             label: Text(
                               busy
-                                  ? progress > 0
+                                  ? coordinating
+                                        ? widget.network.coordinatedSamples > 0
+                                              ? 'Esperando confirmación…'
+                                              : widget
+                                                        .network
+                                                        .deliveredWorkers >
+                                                    0
+                                              ? 'Esperando muestras…'
+                                              : 'Preparando ensayo…'
+                                        : progress > 0
                                         ? 'Midiendo $progress…'
                                         : 'Preparando ensayo…'
                                   : 'Iniciar ensayo desde servidor',
                             ),
                           ),
-                          if (busy && !coordinating)
+                          if (busy)
                             TextButton(
-                              onPressed: () => setState(() => cancel = true),
+                              onPressed: () {
+                                if (coordinating) {
+                                  widget.network.cancelCoordinatedTrial();
+                                } else {
+                                  setState(() => cancel = true);
+                                }
+                              },
                               child: const Text('Cancelar'),
                             ),
                         ],
@@ -3103,6 +3142,15 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                         Text(
                           'Memoria RSS al finalizar ${serverMetric['server_rss_bytes_end'] ?? '—'} B',
                         ),
+                        if (serverMetric['server_distance_unavailable']
+                            case final Map missing when missing.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          const Text('Distancia sin dato para:'),
+                          for (final entry in missing.entries)
+                            Text(
+                              'Cliente ${'${entry.key}'.length > 12 ? '${entry.key}'.substring(0, 12) : entry.key}: ${entry.value}',
+                            ),
+                        ],
                       ],
                     ),
                   ),

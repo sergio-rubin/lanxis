@@ -53,6 +53,16 @@ class PdfReportBuilder {
     final clientLocalCopy = items.any(
       (item) => item.distanceSource == 'server_pending',
     );
+    final distanceWarnings = <String>[];
+    for (final metric in serverMetrics) {
+      final missing = metric['server_distance_unavailable'];
+      if (missing is! Map) continue;
+      for (final entry in missing.entries) {
+        distanceWarnings.add(
+          'Cliente ${_short('${entry.key}')}: ${entry.value}',
+        );
+      }
+    }
     final interpretations = _insights(report, clientLocalCopy: clientLocalCopy);
 
     document.addPage(
@@ -471,6 +481,22 @@ class PdfReportBuilder {
                   ],
               ],
             ),
+            if (distanceWarnings.isNotEmpty) ...[
+              pw.SizedBox(height: 7),
+              pw.Text(
+                'Por qué faltó distancia en el servidor:',
+                style: pw.TextStyle(
+                  font: headingFont,
+                  fontSize: 8,
+                  color: _accent,
+                ),
+              ),
+              for (final warning in distanceWarnings)
+                pw.Text(
+                  warning,
+                  style: const pw.TextStyle(fontSize: 8, color: _muted),
+                ),
+            ],
           ],
           pw.SizedBox(height: 18),
           pw.Inseparable(

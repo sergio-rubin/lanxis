@@ -58,6 +58,7 @@ class DistanceProbe {
         return BleDistanceEstimator.estimate(
           rssiSamples,
           environment: environment,
+          allowSparse: true,
         );
       }
       final meters = (result?['distance_m'] as num?)?.toDouble();

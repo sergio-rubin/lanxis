@@ -426,11 +426,15 @@ class MainActivity : FlutterFragmentActivity() {
             val done = AtomicBoolean(false)
             val samples = mutableListOf<Int>()
             lateinit var callback: ScanCallback
+            val settings = ScanSettings.Builder()
+                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                .build()
+            var unfilteredStarted = false
             fun finish(reason: String?) {
                 if (!done.compareAndSet(false, true)) return
                 activeBleCancel = null
                 try { scanner.stopScan(callback) } catch (_: Exception) { }
-                if (samples.size < 3) {
+                if (samples.isEmpty()) {
                     if (packageManager.hasSystemFeature(PackageManager.FEATURE_WIFI_RTT)) {
                         measureToServer(request.host, request.result)
                     } else {
@@ -443,6 +447,17 @@ class MainActivity : FlutterFragmentActivity() {
                     "source" to "ble_rssi_samples",
                     "rssi_samples_dbm" to samples.toList()
                 ))
+            }
+            fun scanUnfiltered() {
+                if (done.get() || unfilteredStarted) return
+                unfilteredStarted = true
+                try {
+                    scanner.stopScan(callback)
+                    scanner.startScan(null, settings, callback)
+                    handler.postDelayed({ finish(null) }, 5000)
+                } catch (error: Exception) {
+                    finish("Bluetooth no pudo repetir la búsqueda: ${error.message}")
+                }
             }
             callback = object : ScanCallback() {
                 override fun onScanResult(callbackType: Int, result: ScanResult) {
@@ -457,18 +472,23 @@ class MainActivity : FlutterFragmentActivity() {
                     }
                 }
                 override fun onScanFailed(errorCode: Int) {
-                    handler.post { finish("Bluetooth no pudo buscar balizas (código $errorCode).") }
+                    handler.post {
+                        if (unfilteredStarted) {
+                            finish("Bluetooth no pudo buscar balizas (código $errorCode).")
+                        } else {
+                            scanUnfiltered()
+                        }
+                    }
                 }
             }
             val filter = ScanFilter.Builder()
                 .setServiceData(beaconUuid, request.token)
                 .build()
-            val settings = ScanSettings.Builder()
-                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-                .build()
             scanner.startScan(listOf(filter), settings, callback)
             activeBleCancel = { finish("Medición Bluetooth interrumpida.") }
-            handler.postDelayed({ finish(null) }, 5000)
+            handler.postDelayed({
+                if (samples.size < 3) scanUnfiltered() else finish(null)
+            }, 5000)
         } catch (error: SecurityException) {
             unavailable(request.result, "Sin permiso para buscar balizas Bluetooth: ${error.message}")
         } catch (error: Exception) {

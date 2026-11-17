@@ -76,6 +76,40 @@ void main() {
     },
   );
 
+  test(
+    'a server-provided distance keeps its uncertainty in the local copy',
+    () async {
+      final repo = LabRepository.inMemory();
+      final network = NetworkLab(repo);
+      addTearDown(() async {
+        await network.stopServer();
+        repo.dispose();
+      });
+      final port = await network.startServer(port: 0);
+      final session = repo.createSession('Distancia del servidor');
+      final phase = repo.createPhase(session.id, 'Fase');
+      final items = await network.runTrial(
+        base: Uri.parse('http://127.0.0.1:$port'),
+        code: network.pairCode!,
+        session: session,
+        phase: phase,
+        config: const TrialConfig(
+          scenarioId: 'E1',
+          clients: 1,
+          distanceM: 0.4,
+          distanceSource: 'server_ble_rssi_estimate_sparse',
+          distanceUncertaintyM: 3,
+          count: 1,
+          warmup: 0,
+          intervalMs: 0,
+        ),
+      );
+      expect(items.single.distanceM, 0.4);
+      expect(items.single.distanceUncertaintyM, 3);
+      expect(items.single.distanceSource, 'server_ble_rssi_estimate_sparse');
+    },
+  );
+
   test('client identity and result outbox survive reopening SQLite', () async {
     final directory = await Directory.systemTemp.createTemp('lanxis-outbox-');
     addTearDown(() => directory.delete(recursive: true));
@@ -534,6 +568,13 @@ void main() {
     final metadata = jsonDecode(completed['metadata_json'] as String) as Map;
     expect(metadata['server_received_samples'], 2);
     expect(metadata['server_elapsed_ms'], isA<int>());
+    final unavailable = serverRepo
+        .eventsForSession(session.id)
+        .firstWhere((e) => e['type'] == 'distance_unavailable');
+    expect(
+      (jsonDecode(unavailable['metadata_json'] as String) as Map)['reason'],
+      isNotEmpty,
+    );
   }, timeout: const Timeout(Duration(seconds: 45)));
 
   test('server owns each client distance in a two-client report', () async {
@@ -609,10 +650,17 @@ void main() {
         }
       }
       expect(job, isNotNull);
+      final deliveredConfig = Map<String, Object?>.from(job!['config'] as Map);
+      expect(
+        deliveredConfig['distance_m'],
+        clientId == 'client-alpha' ? 1.2 : 4.3,
+      );
+      expect(deliveredConfig['distance_source'], 'server_ble_rssi_estimate');
+      expect(deliveredConfig['distance_uncertainty_m'], 1.5);
       await exchange(
         '/result',
         body: {
-          'job_id': job!['id'],
+          'job_id': job['id'],
           'client_id': clientId,
           'samples': [
             {
@@ -647,4 +695,45 @@ void main() {
       true,
     );
   }, timeout: const Timeout(Duration(seconds: 30)));
+
+  test('server cancels a coordinated wait without losing the trial', () async {
+    final repo = LabRepository.inMemory();
+    final server = NetworkLab(repo);
+    addTearDown(() async {
+      await server.stopServer();
+      repo.dispose();
+    });
+    final port = await server.startServer(port: 0);
+    final base = Uri.parse('http://127.0.0.1:$port');
+    final http = HttpClient();
+    addTearDown(() => http.close(force: true));
+    final registration = await http.postUrl(base.resolve('/register'));
+    registration.headers.set('X-Lanxis-Code', server.pairCode!);
+    registration.headers.contentType = ContentType.json;
+    registration.write(jsonEncode({'client_id': 'client-waiting'}));
+    await (await registration.close()).drain();
+    final poll = await http.getUrl(
+      base.resolve('/work?client_id=client-waiting'),
+    );
+    poll.headers.set('X-Lanxis-Code', server.pairCode!);
+    await (await poll.close()).drain();
+    expect(server.readyWorkers, 1);
+    final session = repo.createSession('Cancelación');
+    final phase = repo.createPhase(session.id, 'Fase');
+    final running = server.runCoordinatedTrial(
+      session: session,
+      phase: phase,
+      config: const TrialConfig(
+        scenarioId: 'E1',
+        clients: 1,
+        count: 5,
+        warmup: 0,
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    server.cancelCoordinatedTrial();
+    expect(await running, 0);
+    expect(server.lastCoordinatedStatus, 'cancelled');
+    expect(repo.trialsForSession(session.id).single['status'], 'cancelled');
+  });
 }

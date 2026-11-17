@@ -45,6 +45,7 @@ class _CoordinatedJob {
   final Set<String> delivered = {};
   final Set<String> completed = {};
   final Completer<void> done = Completer<void>();
+  bool cancelRequested = false;
   bool reconciled = false;
 }
 
@@ -86,7 +87,11 @@ class NetworkLab {
   String? participantCode;
   Future<void>? _participantTask;
   String? lastParticipantError;
+  int completedCoordinatedJobs = 0;
   String? lastDistanceReason;
+  Map<String, DistanceObservation> lastServerDistances = {};
+  String? lastCoordinatedStatus;
+  bool _coordinatedCancelRequested = false;
   UdpBurstResult? lastUdpBurstResult;
 
   bool get isServing => _server != null;
@@ -105,6 +110,7 @@ class NetworkLab {
 
   Future<int> startServer({int port = 8040}) async {
     if (_server != null) return _server!.port;
+    lastServerDistances = {};
     final server = await HttpServer.bind(
       InternetAddress.anyIPv4,
       port,
@@ -201,6 +207,7 @@ class NetworkLab {
   }
 
   Future<void> stopServer() async {
+    cancelCoordinatedTrial();
     await _mdnsStartTask;
     _mdnsStartTask = null;
     try {
@@ -226,6 +233,7 @@ class NetworkLab {
     _readyWorkers.clear();
     _clientBeaconTokens.clear();
     _recentJobs.clear();
+    lastServerDistances = {};
   }
 
   Future<List<DiscoveredServer>> discover({
@@ -518,6 +526,7 @@ class NetworkLab {
               !job.delivered.add(id)) {
             response.write(jsonEncode({'job': null}));
           } else {
+            final distance = job.serverDistances[id];
             response.write(
               jsonEncode({
                 'job': {
@@ -526,7 +535,15 @@ class NetworkLab {
                   'phase_name': job.phase.name,
                   'start_utc': job.startUtc.toIso8601String(),
                   'server_utc': DateTime.now().toUtc().toIso8601String(),
-                  'config': job.config.toJson(),
+                  'config': distance == null
+                      ? job.config.toJson()
+                      : job.config
+                            .withDistance(
+                              distance.meters,
+                              'server_${distance.source}',
+                              distance.uncertaintyM,
+                            )
+                            .toJson(),
                 },
               }),
             );
@@ -955,6 +972,7 @@ class NetworkLab {
       }),
     );
     await _drainResultOutbox(base, code);
+    completedCoordinatedJobs++;
   }
 
   Future<void> _drainResultOutbox(Uri base, String code) async {
@@ -1071,17 +1089,33 @@ class NetworkLab {
         'Se necesitan ${config.clients} participantes activos; hay ${ready.length}.',
       );
     }
+    _coordinatedCancelRequested = false;
+    lastCoordinatedStatus = null;
     final serverDistances = <String, DistanceObservation>{};
+    final distanceObservations = <String, DistanceObservation>{};
     for (final id in ready) {
       final token = _clientBeaconTokens[id];
-      if (token == null) continue;
-      final observation = await distanceProbe.measure(
-        Uri.parse('http://127.0.0.1'),
-        beaconToken: token,
-        environment: config.environment,
-      );
+      final observation = token == null
+          ? const DistanceObservation(
+              reason: 'El cliente no anunció una baliza Bluetooth.',
+            )
+          : await distanceProbe.measure(
+              Uri.parse('http://127.0.0.1'),
+              beaconToken: token,
+              environment: config.environment,
+            );
+      distanceObservations[id] = observation;
       if (observation.meters != null) serverDistances[id] = observation;
+      if (_coordinatedCancelRequested) {
+        lastCoordinatedStatus = 'cancelled';
+        throw StateError('Ensayo cancelado antes de iniciar.');
+      }
     }
+    if (_coordinatedCancelRequested) {
+      lastCoordinatedStatus = 'cancelled';
+      throw StateError('Ensayo cancelado antes de iniciar.');
+    }
+    lastServerDistances = distanceObservations;
     final testId = repository.createTest(phase.id, config.scenarioId, config);
     final trialId = repository.startTrial(testId);
     final serverTimer = Stopwatch()..start();
@@ -1110,6 +1144,21 @@ class NetworkLab {
         },
       }),
     );
+    for (final entry in distanceObservations.entries) {
+      if (entry.value.meters != null) continue;
+      repository.addEvent(
+        'distance_unavailable',
+        sessionId: session.id,
+        phaseId: phase.id,
+        testId: testId,
+        trialId: trialId,
+        severity: 'warning',
+        metadataJson: jsonEncode({
+          'client_id': entry.key,
+          'reason': entry.value.reason ?? 'Sin lectura Bluetooth válida.',
+        }),
+      );
+    }
     var status = 'finished';
     try {
       final estimatedMs =
@@ -1121,6 +1170,10 @@ class NetworkLab {
         Duration(milliseconds: estimatedMs.clamp(60000, 3600000)),
       );
       final actual = repository.trialMeasurementCount(trialId);
+      if (job.cancelRequested || _coordinatedCancelRequested) {
+        status = 'cancelled';
+        return actual;
+      }
       if (actual != config.count * config.clients) {
         status = 'incomplete';
       }
@@ -1129,7 +1182,7 @@ class NetworkLab {
       status = 'timeout';
       rethrow;
     } catch (_) {
-      status = 'failed';
+      if (status != 'cancelled') status = 'failed';
       rethrow;
     } finally {
       serverTimer.stop();
@@ -1138,7 +1191,8 @@ class NetworkLab {
           .where((m) => m.trialId == trialId)
           .toList();
       _activeJob = null;
-      job.reconciled = status == 'finished';
+      lastCoordinatedStatus = status;
+      job.reconciled = status == 'finished' || status == 'cancelled';
       _recentJobs[job.id] = job;
       if (_recentJobs.length > 32) {
         _recentJobs.remove(_recentJobs.keys.first);
@@ -1167,9 +1221,23 @@ class NetworkLab {
             for (final entry in serverDistances.entries)
               entry.key: entry.value.meters,
           },
+          'server_distance_unavailable': {
+            for (final entry in distanceObservations.entries)
+              if (entry.value.meters == null)
+                entry.key:
+                    entry.value.reason ?? 'Sin lectura Bluetooth válida.',
+          },
         }),
       );
     }
+  }
+
+  void cancelCoordinatedTrial() {
+    _coordinatedCancelRequested = true;
+    final job = _activeJob;
+    if (job == null) return;
+    job.cancelRequested = true;
+    if (!job.done.isCompleted) job.done.complete();
   }
 
   Future<void> _validateLocal(Uri uri) async {
@@ -1263,6 +1331,7 @@ class NetworkLab {
           )
         : DistanceObservation(
             meters: config.distanceM,
+            uncertaintyM: config.distanceUncertaintyM,
             source: config.distanceSource == 'unknown'
                 ? 'manual'
                 : config.distanceSource,

@@ -49,6 +49,9 @@ void main() {
               )
               .toList();
           if (counts.every((count) => count >= 5) &&
+              participants.every(
+                (participant) => participant.completedCoordinatedJobs >= 1,
+              ) &&
               repositories.every((repo) => repo.pendingResultCount == 0)) {
             break;
           }
@@ -65,6 +68,7 @@ void main() {
             'client_id': participants[index].clientId,
             'samples': samples.map((sample) => sample.toJson()).toList(),
             'pending_results': repo.pendingResultCount,
+            'confirmed_jobs': participants[index].completedCoordinatedJobs,
             'last_error': participants[index].lastParticipantError,
           });
         }
@@ -81,6 +85,7 @@ void main() {
         for (final record in records) {
           expect((record['samples'] as List).length, greaterThanOrEqualTo(5));
           expect(record['pending_results'], 0);
+          expect(record['confirmed_jobs'], greaterThanOrEqualTo(1));
         }
       } finally {
         monitor?.cancel();
