@@ -13,6 +13,7 @@ import '../core/models.dart';
 import '../core/scenario_planner.dart';
 import '../data/lab_repository.dart';
 import '../export/export_service.dart';
+import '../export/comparison_export.dart';
 import '../network/network_lab.dart';
 import '../platform/hotspot_adapter.dart';
 import '../platform/wifi_qr.dart';
@@ -2556,6 +2557,183 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
   String selectedTrial = 'all';
   String selectedClient = 'all';
   bool exporting = false;
+  final Set<String> comparisonIds = {};
+  String? comparisonBaselineId;
+
+  Future<void> _exportComparison(String format, List<String> ids) async {
+    setState(() => exporting = true);
+    try {
+      final path = await ComparisonExportService(widget.repository)
+          .save(ids, format: format);
+      if (mounted && path != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              Platform.isAndroid
+                  ? 'Comparación guardada en Archivos.'
+                  : 'Comparación exportada a $path',
+            ),
+          ),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('No se pudo exportar la comparación: $error')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => exporting = false);
+    }
+  }
+
+  Widget _comparisonPanel(List<LabSession> sessions) {
+    comparisonIds.removeWhere(
+      (id) => !sessions.any((session) => session.id == id),
+    );
+    final chosen = sessions
+        .where((session) => comparisonIds.contains(session.id))
+        .toList();
+    if (comparisonBaselineId == null ||
+        !chosen.any((session) => session.id == comparisonBaselineId)) {
+      comparisonBaselineId = chosen.firstOrNull?.id;
+    }
+    final ordered = [
+      ?comparisonBaselineId,
+      for (final session in chosen)
+        if (session.id != comparisonBaselineId) session.id,
+    ];
+    final comparison = ordered.length < 2
+        ? null
+        : ComparisonExportService(widget.repository).compare(ordered);
+    final maxMean = comparison?.entries
+        .map((entry) => entry.summary.stats.mean ?? 0)
+        .fold<double>(1, math.max);
+    final theme = Theme.of(context);
+    return AcrylicPanel(
+      child: ExpansionTile(
+        tilePadding: EdgeInsets.zero,
+        title: Text('Comparar sesiones', style: theme.textTheme.titleLarge),
+        subtitle: Text(
+          '${comparisonIds.length} seleccionadas · resultados descriptivos',
+        ),
+        onExpansionChanged: (_) =>
+            FocusManager.instance.primaryFocus?.unfocus(),
+        children: [
+          const Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              'Selecciona al menos dos sesiones. LANXIS recalcula el conjunto desde las muestras originales; las barras comparan sus medias.',
+            ),
+          ),
+          const SizedBox(height: 8),
+          for (final session in sessions)
+            CheckboxListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: Text(session.name),
+              subtitle: Text(session.id),
+              value: comparisonIds.contains(session.id),
+              onChanged: (value) => setState(() {
+                if (value == true) {
+                  comparisonIds.add(session.id);
+                } else {
+                  comparisonIds.remove(session.id);
+                }
+              }),
+            ),
+          if (comparison != null) ...[
+            const SizedBox(height: 10),
+            SizedBox(
+              width: 320,
+              child: DropdownButtonFormField<String>(
+                key: ValueKey('comparison-baseline-$comparisonBaselineId'),
+                isExpanded: true,
+                initialValue: comparisonBaselineId,
+                decoration: const InputDecoration(
+                  labelText: 'Sesión de referencia',
+                ),
+                items: [
+                  for (final session in chosen)
+                    DropdownMenuItem(
+                      value: session.id,
+                      child: Text(
+                        session.name,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                ],
+                onChanged: (value) =>
+                    setState(() => comparisonBaselineId = value),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                '${comparison.pooled.total} intentos · ${comparison.pooled.valid} RTT válidos · media conjunta ${comparison.pooled.stats.mean?.toStringAsFixed(2) ?? '—'} ms · SLA ${(comparison.pooled.sla == null ? '—' : '${(comparison.pooled.sla! * 100).toStringAsFixed(1)} %')}',
+                style: theme.textTheme.titleMedium,
+              ),
+            ),
+            const SizedBox(height: 12),
+            for (final entry in comparison.entries)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '${entry.session.name}${entry.session.id == comparisonBaselineId ? ' · referencia' : ''}',
+                      style: theme.textTheme.titleSmall,
+                    ),
+                    Text(
+                      '${entry.summary.total} intentos · ${entry.summary.failed} fallos · media ${entry.summary.stats.mean?.toStringAsFixed(2) ?? '—'} ms · P95 ${entry.summary.stats.p95?.toStringAsFixed(2) ?? '—'} ms · SLA ${entry.summary.sla == null ? '—' : '${(entry.summary.sla! * 100).toStringAsFixed(1)} %'}',
+                    ),
+                    const SizedBox(height: 5),
+                    SizedBox(
+                      width: 260,
+                      child: LinearProgressIndicator(
+                        value:
+                            ((entry.summary.stats.mean ?? 0) / (maxMean ?? 1))
+                                .clamp(0, 1),
+                        minHeight: 5,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            for (final warning in comparison.warnings)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Padding(
+                  padding: const EdgeInsets.only(bottom: 5),
+                  child: Text(warning, style: theme.textTheme.bodySmall),
+                ),
+              ),
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final format in ['csv', 'json', 'html', 'pdf', 'zip'])
+                    OutlinedButton(
+                      onPressed: exporting
+                          ? null
+                          : () => _exportComparison(format, ordered),
+                      child: exporting
+                          ? const GeometryLoader()
+                          : Text('Comparación ${format.toUpperCase()}'),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
 
   Future<void> _exportSelection(String format) async {
     if (selected == null) return;
@@ -2878,6 +3056,10 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                       ),
                   ],
                 ),
+              if (sessions.length >= 2) ...[
+                const SizedBox(height: 16),
+                _comparisonPanel(sessions),
+              ],
               const SizedBox(height: 18),
               if (items.isEmpty)
                 const AcrylicPanel(
