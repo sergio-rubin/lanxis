@@ -78,7 +78,7 @@ void main() {
         stdout.writeln('Cliente: ${samples.firstOrNull?.clientId}');
         expect(actual, 5);
         expect(samples.every((m) => m.success && m.clientId != null), true);
-        final output = File('dist/physical-android-client-4016.json');
+        final output = File('dist/physical-android-client-4017.json');
         output.parent.createSync(recursive: true);
         output.writeAsStringSync(ExportService(repo).json(session.id));
         stdout.writeln('Exportación local: ${output.path}');

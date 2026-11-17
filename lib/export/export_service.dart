@@ -582,9 +582,47 @@ ${[
     ExportScope scope = const ExportScope(),
   }) async {
     final session = repository.sessions().firstWhere((s) => s.id == sessionId);
-    final summary = _summary(sessionId, scope);
     final report = AnalysisReport(_items(sessionId, scope));
     final serverMetrics = _serverMetrics(sessionId, scope);
+    String milliseconds(num? value) =>
+        value == null ? '—' : '${value.toStringAsFixed(2)} ms';
+    String percentage(num? value) =>
+        value == null ? '—' : '${(value * 100).toStringAsFixed(1)} %';
+    final trialTestId = scope.trialId == null
+        ? null
+        : repository
+                  .trialsForSession(sessionId)
+                  .where((trial) => trial['id'] == scope.trialId)
+                  .firstOrNull?['test_id']
+              as String?;
+    final conditions = <List<String>>[];
+    for (final test in repository.testsForSession(sessionId)) {
+      if ((scope.phaseId != null && test['phase_id'] != scope.phaseId) ||
+          (scope.testId != null && test['id'] != scope.testId) ||
+          (trialTestId != null && test['id'] != trialTestId)) {
+        continue;
+      }
+      final config = TrialConfig.fromJson(
+        Map<String, Object?>.from(
+          jsonDecode(test['config_json'] as String) as Map,
+        ),
+      );
+      conditions.add([
+        config.scenarioId,
+        '${config.clients}',
+        '${config.count}',
+        '${config.payloadBytes}',
+        '${config.protocol}/${config.direction}',
+        config.environment,
+        config.targetDistanceM?.toStringAsFixed(2) ?? '—',
+      ]);
+    }
+    final bins = DescriptiveEngine.frequency(
+      _items(
+        sessionId,
+        scope,
+      ).where((m) => m.success && m.latencyMs != null).map((m) => m.latencyMs!),
+    );
     final fontData = await rootBundle.load('assets/fonts/Manrope.ttf');
     final font = pw.Font.ttf(fontData);
     final document = pw.Document();
@@ -611,12 +649,37 @@ ${[
           pw.Text(
             'RTT de aplicación del protocolo registrado (HTTP, TCP o UDP) medido con reloj monotónico. Muestras de calentamiento excluidas. Fallos conservados para SLA. Cuartiles tipo 7; varianza muestral n−1; SLA estricto menor que 50 ms.',
           ),
+          pw.Header(level: 1, text: 'Condiciones experimentales'),
+          if (conditions.isEmpty)
+            pw.Text('No hay pruebas configuradas en esta selección.')
+          else
+            pw.TableHelper.fromTextArray(
+              headers: [
+                'Escenario',
+                'Clientes',
+                'n/cliente',
+                'Carga B',
+                'Protocolo',
+                'Ambiente',
+                'Objetivo m',
+              ],
+              data: conditions,
+            ),
           pw.Header(level: 1, text: 'Resumen de resultados'),
           pw.TableHelper.fromTextArray(
             headers: ['Indicador', 'Valor'],
             data: [
-              for (final entry in summary.entries)
-                [entry.key, '${entry.value ?? '—'}'],
+              ['Observaciones', '${report.general.total}'],
+              ['RTT válidos', '${report.general.valid}'],
+              ['Fallos', '${report.general.failed}'],
+              ['RTT medio', milliseconds(report.general.stats.mean)],
+              ['Mediana', milliseconds(report.general.stats.median)],
+              ['P95', milliseconds(report.general.stats.p95)],
+              [
+                'Desviación estándar',
+                milliseconds(report.general.stats.standardDeviation),
+              ],
+              ['SLA < 50 ms', percentage(report.general.sla)],
             ],
           ),
           pw.Header(level: 1, text: 'Interpretación general'),
@@ -636,10 +699,10 @@ ${[
                 [
                   entry.key,
                   '${entry.value.total}',
-                  '${entry.value.stats.mean ?? '—'}',
-                  '${entry.value.stats.p95 ?? '—'}',
-                  '${entry.value.sla ?? '—'}',
-                  '${entry.value.medianDistanceM ?? '—'}',
+                  milliseconds(entry.value.stats.mean),
+                  milliseconds(entry.value.stats.p95),
+                  percentage(entry.value.sla),
+                  entry.value.medianDistanceM?.toStringAsFixed(2) ?? '—',
                 ],
             ],
           ),
@@ -647,6 +710,36 @@ ${[
             pw.Header(level: 2, text: 'Cliente ${entry.key}'),
             pw.Text(entry.value.interpretation),
           ],
+          pw.Inseparable(
+            child: pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                pw.Header(level: 1, text: 'Distribución de latencia'),
+                if (bins.isEmpty)
+                  pw.Text('Sin RTT válido para dibujar la distribución.')
+                else ...[
+                  pw.Text(
+                    'Histograma vectorial de ${bins.fold<int>(0, (sum, bin) => sum + bin.frequency)} respuestas válidas. Clases ordenadas de menor a mayor RTT.',
+                  ),
+                  pw.SizedBox(height: 10),
+                  _pdfHistogram(bins),
+                  pw.SizedBox(height: 10),
+                  pw.TableHelper.fromTextArray(
+                    headers: ['Clase', 'Intervalo RTT ms', 'fi', 'fr %'],
+                    data: [
+                      for (final (index, bin) in bins.indexed)
+                        [
+                          '${index + 1}',
+                          '[${bin.lower.toStringAsFixed(2)}, ${bin.upper.toStringAsFixed(2)}${index == bins.length - 1 ? ']' : ')'}',
+                          '${bin.frequency}',
+                          (bin.relative * 100).toStringAsFixed(1),
+                        ],
+                    ],
+                  ),
+                ],
+              ],
+            ),
+          ),
           pw.Header(level: 1, text: 'Métricas del servidor'),
           pw.Text(
             'Duración del ensayo, muestras recibidas, carga útil enviada y recibida, y memoria RSS al finalizar. No incluyen cabeceras de transporte.',
@@ -681,6 +774,44 @@ ${[
       ),
     );
     return document.save();
+  }
+
+  static pw.Widget _pdfHistogram(List<FrequencyClass> bins) {
+    final highest = bins
+        .map((bin) => bin.frequency)
+        .reduce((a, b) => a > b ? a : b);
+    return pw.CustomPaint(
+      size: const PdfPoint(480, 150),
+      painter: (canvas, size) {
+        const left = 24.0;
+        const bottom = 18.0;
+        const top = 10.0;
+        const right = 8.0;
+        final plotWidth = size.x - left - right;
+        final plotHeight = size.y - top - bottom;
+        canvas
+          ..setStrokeColor(PdfColors.blueGrey400)
+          ..setLineWidth(1)
+          ..moveTo(left, bottom + plotHeight)
+          ..lineTo(left, bottom)
+          ..lineTo(left + plotWidth, bottom)
+          ..strokePath();
+        final step = plotWidth / bins.length;
+        for (var i = 0; i < bins.length; i++) {
+          final barWidth = step * .65;
+          final barHeight = bins[i].frequency / highest * plotHeight;
+          canvas
+            ..setFillColor(const PdfColor(.23, .55, .66))
+            ..drawRect(
+              left + i * step + (step - barWidth) / 2,
+              bottom,
+              barWidth,
+              barHeight,
+            )
+            ..fillPath();
+        }
+      },
+    );
   }
 
   static String _csvCell(Object? value) {
