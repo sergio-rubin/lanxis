@@ -8,6 +8,22 @@ import 'package:lanxis/data/lab_repository.dart';
 import 'package:lanxis/network/network_lab.dart';
 import 'package:lanxis/network/tcp_transfer.dart';
 import 'package:lanxis/network/udp_echo.dart';
+import 'package:lanxis/platform/distance_probe.dart';
+
+class _KnownClientDistance extends DistanceProbe {
+  const _KnownClientDistance();
+
+  @override
+  Future<DistanceObservation> measure(
+    Uri server, {
+    String? beaconToken,
+    String environment = 'indoor',
+  }) async => DistanceObservation(
+    meters: beaconToken == 'aabbccddeeff' ? 1.2 : 4.3,
+    uncertaintyM: 1.5,
+    source: 'ble_rssi_estimate',
+  );
+}
 
 void main() {
   test('LAN discovery falls back to a verified HTTP health probe', () async {
@@ -87,6 +103,39 @@ void main() {
     expect(third.pendingResults('http://127.0.0.1:8040'), isEmpty);
     third.dispose();
   });
+
+  test(
+    'a restarted server rejects an obsolete batch without losing it',
+    () async {
+      final serverRepo = LabRepository.inMemory();
+      final clientRepo = LabRepository.inMemory();
+      final server = NetworkLab(serverRepo);
+      final client = NetworkLab(clientRepo);
+      addTearDown(() async {
+        await client.stopParticipant();
+        await server.stopServer();
+        clientRepo.dispose();
+        serverRepo.dispose();
+      });
+      final port = await server.startServer(port: 0);
+      final base = Uri.parse('http://127.0.0.1:$port');
+      clientRepo.queueResult(
+        base.toString(),
+        jsonEncode({
+          'job_id': 'trial-from-previous-server',
+          'client_id': client.clientId,
+          'complete': true,
+        }),
+      );
+      await client.startParticipant(base, server.pairCode!);
+      for (var i = 0; i < 50 && clientRepo.rejectedResultCount == 0; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+      expect(clientRepo.rejectedResultCount, 1);
+      expect(clientRepo.pendingResultCount, 0);
+      expect(serverRepo.sessions(), isEmpty);
+    },
+  );
 
   test('session hierarchy and duplicate request protection', () {
     final repo = LabRepository.inMemory();
@@ -486,4 +535,116 @@ void main() {
     expect(metadata['server_received_samples'], 2);
     expect(metadata['server_elapsed_ms'], isA<int>());
   }, timeout: const Timeout(Duration(seconds: 45)));
+
+  test('server owns each client distance in a two-client report', () async {
+    final repo = LabRepository.inMemory();
+    final server = NetworkLab(
+      repo,
+      distanceProbe: const _KnownClientDistance(),
+    );
+    addTearDown(() async {
+      await server.stopServer();
+      repo.dispose();
+    });
+    final port = await server.startServer(port: 0);
+    final base = Uri.parse('http://127.0.0.1:$port');
+    final code = server.pairCode!;
+
+    Future<Map<String, dynamic>> exchange(
+      String path, {
+      Map<String, Object?>? body,
+    }) async {
+      final http = HttpClient();
+      try {
+        final request = body == null
+            ? await http.getUrl(base.resolve(path))
+            : await http.postUrl(base.resolve(path));
+        request.headers.set('X-Lanxis-Code', code);
+        if (body != null) {
+          request.headers.contentType = ContentType.json;
+          request.write(jsonEncode(body));
+        }
+        final response = await request.close();
+        expect(response.statusCode, 200);
+        return jsonDecode(await utf8.decoder.bind(response).join())
+            as Map<String, dynamic>;
+      } finally {
+        http.close(force: true);
+      }
+    }
+
+    const clients = {
+      'client-alpha': 'aabbccddeeff',
+      'client-bravo': '112233445566',
+    };
+    for (final entry in clients.entries) {
+      await exchange(
+        '/register',
+        body: {'client_id': entry.key, 'distance_beacon_token': entry.value},
+      );
+      await exchange('/work?client_id=${entry.key}');
+    }
+    expect(server.readyWorkers, 2);
+    final session = repo.createSession('Distancia del servidor');
+    final phase = repo.createPhase(session.id, 'Dos clientes');
+    final trial = server.runCoordinatedTrial(
+      session: session,
+      phase: phase,
+      config: const TrialConfig(
+        scenarioId: 'E4',
+        clients: 2,
+        count: 1,
+        warmup: 0,
+        intervalMs: 0,
+      ),
+    );
+    for (final clientId in clients.keys) {
+      Map<String, dynamic>? job;
+      for (var i = 0; i < 30 && job == null; i++) {
+        job =
+            (await exchange('/work?client_id=$clientId'))['job']
+                as Map<String, dynamic>?;
+        if (job == null) {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        }
+      }
+      expect(job, isNotNull);
+      await exchange(
+        '/result',
+        body: {
+          'job_id': job!['id'],
+          'client_id': clientId,
+          'samples': [
+            {
+              'request_id': 'request-$clientId',
+              'success': true,
+              'bytes_recibidos': 32,
+              'timestamp_utc': DateTime.now().toUtc().toIso8601String(),
+              'latencia_ms': clientId == 'client-alpha' ? 12.0 : 25.0,
+              'distancia_m': 99.0,
+              'origen_distancia': 'client_guess',
+            },
+          ],
+        },
+      );
+      await exchange(
+        '/result',
+        body: {'job_id': job['id'], 'client_id': clientId, 'complete': true},
+      );
+    }
+    expect(await trial, 2);
+    final byClient = {
+      for (final item in repo.measurements(session.id)) item.clientId: item,
+    };
+    expect(byClient['client-alpha']!.distanceM, 1.2);
+    expect(byClient['client-bravo']!.distanceM, 4.3);
+    expect(
+      byClient.values.every(
+        (m) =>
+            m.distanceSource == 'server_ble_rssi_estimate' &&
+            m.distanceUncertaintyM == 1.5,
+      ),
+      true,
+    );
+  }, timeout: const Timeout(Duration(seconds: 30)));
 }

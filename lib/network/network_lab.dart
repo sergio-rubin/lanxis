@@ -49,8 +49,12 @@ class _CoordinatedJob {
 }
 
 class NetworkLab {
-  NetworkLab(this.repository) : clientId = repository.clientIdentity;
+  NetworkLab(
+    this.repository, {
+    this.distanceProbe = const DistanceProbe(),
+  }) : clientId = repository.clientIdentity;
   final LabRepository repository;
+  final DistanceProbe distanceProbe;
   static const protocolVersion = 1;
   static const maxDownloadBytes = 100 * 1024 * 1024;
   static const mdnsServiceType = '_lanxis._tcp';
@@ -1012,7 +1016,7 @@ class NetworkLab {
     for (final id in ready) {
       final token = _clientBeaconTokens[id];
       if (token == null) continue;
-      final observation = await const DistanceProbe().measure(
+      final observation = await distanceProbe.measure(
         Uri.parse('http://127.0.0.1'),
         beaconToken: token,
         environment: config.environment,
@@ -1193,7 +1197,7 @@ class NetworkLab {
             reason: 'La distancia de este ensayo la mide el servidor.',
           )
         : config.distanceM == null
-        ? await const DistanceProbe().measure(
+        ? await distanceProbe.measure(
             base,
             beaconToken: capabilities['distance_beacon_token'] as String?,
             environment: config.environment,
