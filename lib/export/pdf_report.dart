@@ -50,7 +50,10 @@ class PdfReportBuilder {
     final exported = DateTime.now().toUtc().toIso8601String();
     final document = pw.Document();
     final summary = report.general;
-    final interpretations = _insights(report);
+    final clientLocalCopy = items.any(
+      (item) => item.distanceSource == 'server_pending',
+    );
+    final interpretations = _insights(report, clientLocalCopy: clientLocalCopy);
 
     document.addPage(
       pw.MultiPage(
@@ -126,6 +129,13 @@ class PdfReportBuilder {
             'Alcance: $scopeLabel  ·  ID ${session.id}',
             style: const pw.TextStyle(fontSize: 8, color: _muted),
           ),
+          if (clientLocalCopy) ...[
+            pw.SizedBox(height: 7),
+            pw.Text(
+              'Copia local del participante. La distancia y las métricas finales calculadas por el servidor se consultan en su informe.',
+              style: const pw.TextStyle(fontSize: 8, color: _accent),
+            ),
+          ],
           pw.SizedBox(height: 20),
           _section('01', 'Resultados de un vistazo', headingFont),
           pw.SizedBox(height: 9),
@@ -246,17 +256,26 @@ class PdfReportBuilder {
             ),
           ],
           pw.SizedBox(height: 18),
-          _section('04', 'Distribución y dispersión', headingFont),
-          pw.SizedBox(height: 7),
-          if (bins.isEmpty)
-            _empty('Sin respuestas válidas para construir el histograma.')
-          else ...[
-            pw.Text(
-              'Frecuencia de RTT por intervalo. Las barras muestran recuentos, no probabilidad modelada.',
-              style: const pw.TextStyle(fontSize: 8, color: _muted),
+          pw.Inseparable(
+            child: pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                _section('04', 'Distribución y dispersión', headingFont),
+                pw.SizedBox(height: 7),
+                if (bins.isEmpty)
+                  _empty('Sin respuestas válidas para construir el histograma.')
+                else ...[
+                  pw.Text(
+                    'Frecuencia de RTT por intervalo. Las barras muestran recuentos, no probabilidad modelada.',
+                    style: const pw.TextStyle(fontSize: 8, color: _muted),
+                  ),
+                  pw.SizedBox(height: 7),
+                  _histogram(bins),
+                ],
+              ],
             ),
-            pw.SizedBox(height: 7),
-            _histogram(bins),
+          ),
+          if (bins.isNotEmpty) ...[
             pw.SizedBox(height: 6),
             _table(
               ['Intervalo RTT (ms)', 'Frecuencia', 'Porcentaje'],
@@ -385,11 +404,33 @@ class PdfReportBuilder {
               ),
           ],
           pw.SizedBox(height: 12),
-          _section('06', 'Condiciones y servidor', headingFont),
-          pw.SizedBox(height: 7),
-          if (conditions.isEmpty)
-            _empty('No hay pruebas configuradas en esta selección.')
-          else
+          pw.Inseparable(
+            child: pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                _section('06', 'Condiciones y servidor', headingFont),
+                pw.SizedBox(height: 7),
+                if (conditions.isEmpty)
+                  _empty('No hay pruebas configuradas en esta selección.')
+                else if (conditions.length <= 6)
+                  _table([
+                    'Escenario',
+                    'Clientes',
+                    'n previsto',
+                    'Carga B',
+                    'Protocolo',
+                    'Ambiente',
+                    'Objetivo m',
+                  ], conditions)
+                else
+                  pw.Text(
+                    '${conditions.length} configuraciones seleccionadas.',
+                    style: const pw.TextStyle(fontSize: 8, color: _muted),
+                  ),
+              ],
+            ),
+          ),
+          if (conditions.length > 6)
             _table([
               'Escenario',
               'Clientes',
@@ -401,7 +442,11 @@ class PdfReportBuilder {
             ], conditions),
           pw.SizedBox(height: 10),
           if (serverMetrics.isEmpty)
-            _empty('No hay métricas de ensayo coordinado para esta selección.')
+            _empty(
+              clientLocalCopy
+                  ? 'Esta copia del cliente no incluye métricas del servidor. Expórtalas desde el servidor LANXIS.'
+                  : 'No hay métricas de ensayo coordinado para esta selección.',
+            )
           else ...[
             pw.Text(
               'Métricas del servidor por ensayo; la carga útil no incluye cabeceras de transporte.',
@@ -428,23 +473,30 @@ class PdfReportBuilder {
             ),
           ],
           pw.SizedBox(height: 18),
-          _section('07', 'Método y límites', headingFont),
-          pw.SizedBox(height: 6),
-          pw.Text(
-            'RTT de aplicación del protocolo registrado, medido con reloj monotónico local. Calentamientos excluidos. Fallos incluidos en el denominador del SLA estricto (RTT < 50 ms). Cuartiles y percentiles por interpolación tipo 7; desviación estándar muestral con n - 1.',
-            style: const pw.TextStyle(
-              fontSize: 8.5,
-              color: _ink,
-              lineSpacing: 2,
-            ),
-          ),
-          pw.SizedBox(height: 6),
-          pw.Text(
-            'La carga, el sistema operativo y el entorno radioeléctrico afectan los resultados. BLE por RSSI produce una estimación orientativa con incertidumbre, no una distancia calibrada. Las muestras repetidas pueden estar correlacionadas; los resúmenes son descriptivos y no demuestran causalidad.',
-            style: const pw.TextStyle(
-              fontSize: 8.5,
-              color: _muted,
-              lineSpacing: 2,
+          pw.Inseparable(
+            child: pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                _section('07', 'Método y límites', headingFont),
+                pw.SizedBox(height: 6),
+                pw.Text(
+                  'RTT de aplicación del protocolo registrado, medido con reloj monotónico local. Calentamientos excluidos. Fallos incluidos en el denominador del SLA estricto (RTT < 50 ms). Cuartiles y percentiles por interpolación tipo 7; desviación estándar muestral con n - 1.',
+                  style: const pw.TextStyle(
+                    fontSize: 8.5,
+                    color: _ink,
+                    lineSpacing: 2,
+                  ),
+                ),
+                pw.SizedBox(height: 6),
+                pw.Text(
+                  'La carga, el sistema operativo y el entorno radioeléctrico afectan los resultados. BLE por RSSI produce una estimación orientativa con incertidumbre, no una distancia calibrada. Las muestras repetidas pueden estar correlacionadas; los resúmenes son descriptivos y no demuestran causalidad.',
+                  style: const pw.TextStyle(
+                    fontSize: 8.5,
+                    color: _muted,
+                    lineSpacing: 2,
+                  ),
+                ),
+              ],
             ),
           ),
         ],
@@ -460,7 +512,10 @@ class PdfReportBuilder {
   static String _pct(num? value) =>
       value == null ? '—' : '${(value * 100).toStringAsFixed(1)} %';
 
-  static List<String> _insights(AnalysisReport report) {
+  static List<String> _insights(
+    AnalysisReport report, {
+    required bool clientLocalCopy,
+  }) {
     final summary = report.general;
     if (summary.total == 0) {
       return [
@@ -493,7 +548,9 @@ class PdfReportBuilder {
       );
     } else {
       result.add(
-        'La distancia no estuvo disponible; las estadísticas de RTT se calculan sin inventar metros.',
+        clientLocalCopy
+            ? 'Esta copia local no incluye la distancia que mide el servidor. Consulta el informe del servidor para verla con su incertidumbre.'
+            : 'La distancia no estuvo disponible; las estadísticas de RTT se calculan sin inventar metros.',
       );
     }
     final ranked =
