@@ -5,6 +5,28 @@ import 'package:lanxis/data/lab_repository.dart';
 import 'package:sqlite3/sqlite3.dart';
 
 void main() {
+  test('version 5 pending outbox migrates without losing old results', () {
+    final directory = Directory.systemTemp.createTempSync('lanxis-outbox-v5-');
+    addTearDown(() => directory.deleteSync(recursive: true));
+    final file = File('${directory.path}/legacy.sqlite');
+    final db = sqlite3.open(file.path);
+    db.execute('''
+      CREATE TABLE result_outbox (
+        id TEXT PRIMARY KEY, server_url TEXT NOT NULL,
+        payload_json TEXT NOT NULL, created_utc TEXT NOT NULL
+      );
+      INSERT INTO result_outbox VALUES ('old', 'http://127.0.0.1:8040', '{"job_id":"j"}', '2026-11-16T00:00:00Z');
+      PRAGMA user_version = 5;
+    ''');
+    db.close();
+    final repo = LabRepository.openAt(file);
+    addTearDown(repo.dispose);
+    expect(repo.pendingResultCount, 1);
+    repo.markResultRejected('old');
+    expect(repo.pendingResultCount, 0);
+    expect(repo.rejectedResultCount, 1);
+  });
+
   test('version 4 measurements migrate without losing observations', () {
     final directory = Directory.systemTemp.createTempSync('lanxis-migration-');
     addTearDown(() => directory.deleteSync(recursive: true));

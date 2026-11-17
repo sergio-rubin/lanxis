@@ -244,6 +244,8 @@ class _DistributionExplorerState extends State<DistributionExplorer> {
                     ),
                     decoration: InputDecoration(labelText: key),
                     onChanged: (_) => setState(() {}),
+                    onTapOutside: (_) =>
+                        FocusManager.instance.primaryFocus?.unfocus(),
                   ),
                 ),
             ],

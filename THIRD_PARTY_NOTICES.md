@@ -22,6 +22,7 @@ Dependencias directas verificadas en el caché de `pub.dev` el 16 de noviembre d
 | `pdf` | 3.13.1 | Apache-2.0 |
 | `dbus` | 0.8.0 | MPL-2.0 |
 | `bonsoir` y sus adaptadores | Versiones fijadas en `pubspec.lock` | MIT |
+| `qr_flutter` | 4.1.0 | BSD-3-Clause (Luke Freeman) |
 
 Los textos completos de dependencias transitivas se encuentran en sus paquetes, fijados en `pubspec.lock`; la distribución binaria debe incluir el listado de licencias generado por Flutter.
 

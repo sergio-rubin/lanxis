@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:archive/archive.dart';
 import 'package:crypto/crypto.dart';
@@ -6,26 +7,31 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/services.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
+import 'package:path_provider/path_provider.dart';
 
 import '../data/lab_repository.dart';
 import '../core/models.dart';
 import '../science/descriptive.dart';
+import '../science/analysis_report.dart';
 
 class ExportScope {
-  const ExportScope({this.phaseId, this.testId, this.trialId});
+  const ExportScope({this.phaseId, this.testId, this.trialId, this.clientId});
   final String? phaseId;
   final String? testId;
   final String? trialId;
+  final String? clientId;
 
   bool matches(Measurement item) =>
       (phaseId == null || item.phaseId == phaseId) &&
       (testId == null || item.testId == testId) &&
-      (trialId == null || item.trialId == trialId);
+      (trialId == null || item.trialId == trialId) &&
+      (clientId == null || (item.clientId ?? 'Sin identificador') == clientId);
 
   Map<String, Object?> toJson() => {
     if (phaseId != null) 'phase_id': phaseId,
     if (testId != null) 'test_id': testId,
     if (trialId != null) 'trial_id': trialId,
+    if (clientId != null) 'client_id': clientId,
   };
 }
 
@@ -83,6 +89,37 @@ class ExportService {
     for (final item in items) {
       final row = item.toJson();
       buffer.writeln(columns.map((name) => _csvCell(row[name])).join(','));
+    }
+    return buffer.toString();
+  }
+
+  String analysisCsv(
+    String sessionId, {
+    ExportScope scope = const ExportScope(),
+  }) {
+    final report = AnalysisReport(_items(sessionId, scope));
+    final rows = [report.general, ...report.individual.values];
+    final buffer = StringBuffer(
+      'alcance,cliente_id,n_total,n_valid,n_failed,n_without_valid_rtt,media_ms,mediana_ms,p95_ms,sla,distancia_mediana_m,incertidumbre_max_m,interpretacion\r\n',
+    );
+    for (final (index, row) in rows.indexed) {
+      buffer.writeln(
+        [
+          index == 0 ? 'general' : 'individual',
+          index == 0 ? '' : row.label,
+          row.total,
+          row.valid,
+          row.failed,
+          row.withoutValidRtt,
+          row.stats.mean,
+          row.stats.median,
+          row.stats.p95,
+          row.sla,
+          row.medianDistanceM,
+          row.maxUncertaintyM,
+          row.interpretation,
+        ].map(_csvCell).join(','),
+      );
     }
     return buffer.toString();
   }
@@ -162,6 +199,8 @@ class ExportService {
           )
           .toList(),
       'summary': _summary(sessionId, scope),
+      'analysis': AnalysisReport(_items(sessionId, scope)).toJson(),
+      'server_metrics': _serverMetrics(sessionId, scope),
       'definitions': {
         'latency_ms': 'Application HTTP RTT using local monotonic clock',
         'jitter_ms': '|RTT_i - RTT_(i-1)| for consecutive valid observations',
@@ -189,6 +228,30 @@ class ExportService {
       'method': 'Quartiles type 7; sample variance n-1; SLA strict < 50 ms',
     };
   }
+
+  List<Map<String, Object?>> _serverMetrics(
+    String sessionId,
+    ExportScope scope,
+  ) => repository
+      .eventsForSession(sessionId)
+      .where(
+        (e) =>
+            (e['type'] as String? ?? '').startsWith('coordinated_trial_') &&
+            e['type'] != 'coordinated_trial_started' &&
+            (scope.phaseId == null || e['phase_id'] == scope.phaseId) &&
+            (scope.testId == null || e['test_id'] == scope.testId) &&
+            (scope.trialId == null || e['trial_id'] == scope.trialId),
+      )
+      .map(
+        (e) => {
+          'trial_id': e['trial_id'],
+          'status': e['type'],
+          ...Map<String, Object?>.from(
+            jsonDecode(e['metadata_json'] as String) as Map,
+          ),
+        },
+      )
+      .toList();
 
   String jsonl(String sessionId, {ExportScope scope = const ExportScope()}) {
     final lines = <String>[
@@ -219,6 +282,8 @@ class ExportService {
     final session = repository.sessions().firstWhere((s) => s.id == sessionId);
     final summary = _summary(sessionId, scope);
     final items = _items(sessionId, scope);
+    final report = AnalysisReport(items);
+    final serverMetrics = _serverMetrics(sessionId, scope);
     final bins = DescriptiveEngine.frequency(
       items
           .where((m) => m.success && m.latencyMs != null)
@@ -238,14 +303,21 @@ svg{width:100%;height:auto}.muted{color:#587481}</style></head><body>
 <h1>LANXIS · ${cell(session.name)}</h1>
 <p class="muted">Sesión ${cell(session.id)} · Exportado ${DateTime.now().toUtc().toIso8601String()} UTC</p>
 <p class="muted">Alcance: ${cell(scope.toJson().isEmpty ? 'Sesión completa' : scope.toJson())}</p>
-<section><h2>Metodología</h2><p>RTT HTTP de aplicación con reloj monotónico local. Calentamientos excluidos del análisis. Fallos incluidos en el denominador del SLA. Cuartiles tipo 7, varianza muestral n−1 y criterio SLA estricto de latencia &lt; 50 ms.</p></section>
+<section><h2>Metodología</h2><p>RTT de aplicación del protocolo registrado (HTTP, TCP o UDP) con reloj monotónico local. Calentamientos excluidos del análisis. Fallos incluidos en el denominador del SLA. Cuartiles tipo 7, varianza muestral n−1 y criterio SLA estricto de latencia &lt; 50 ms.</p></section>
 <section><h2>Resultados</h2><table><tbody>
 ${summary.entries.map((e) => '<tr><th>${cell(e.key)}</th><td>${cell(e.value)}</td></tr>').join()}
+</tbody></table></section>
+<section><h2>Interpretación general</h2><p>${cell(report.general.interpretation)}</p></section>
+<section><h2>Análisis por cliente</h2><table><thead><tr><th>Cliente</th><th>n</th><th>RTT medio</th><th>P95</th><th>SLA</th><th>Distancia mediana</th></tr></thead><tbody>
+${report.individual.entries.map((e) => '<tr><td>${cell(e.key)}</td><td>${e.value.total}</td><td>${cell(e.value.stats.mean)}</td><td>${cell(e.value.stats.p95)}</td><td>${cell(e.value.sla)}</td><td>${cell(e.value.medianDistanceM)}</td></tr>').join()}
+</tbody></table>${report.individual.entries.map((e) => '<h3>${cell(e.key)}</h3><p>${cell(e.value.interpretation)}</p>').join()}</section>
+<section><h2>Métricas del servidor</h2><p>Duración y carga útil contabilizadas por el servidor; memoria RSS al terminar. No incluyen cabeceras de transporte.</p><table><thead><tr><th>Ensayo</th><th>Estado</th><th>Duración ms</th><th>Muestras</th><th>Enviado B</th><th>Recibido B</th><th>RSS B</th></tr></thead><tbody>
+${serverMetrics.map((m) => '<tr><td>${cell(m['trial_id'])}</td><td>${cell(m['status'])}</td><td>${cell(m['server_elapsed_ms'])}</td><td>${cell(m['server_received_samples'])}</td><td>${cell(m['server_payload_sent_bytes'])}</td><td>${cell(m['server_payload_received_bytes'])}</td><td>${cell(m['server_rss_bytes_end'])}</td></tr>').join()}
 </tbody></table></section>
 <section><h2>Distribución de latencia</h2><svg viewBox="0 0 700 240" role="img" aria-label="Histograma de latencias">
 ${[for (var i = 0; i < bins.length; i++) '<rect x="${45 + i * 90}" y="${200 - bins[i].frequency / maxCount * 170}" width="60" height="${bins[i].frequency / maxCount * 170}" fill="#3a8ca8" rx="5"/><text x="${55 + i * 90}" y="220" fill="#123042">${i + 1}</text>'].join()}
 </svg><p>Clases ordenadas de menor a mayor latencia. n válido: ${bins.fold<int>(0, (sum, b) => sum + b.frequency)}.</p></section>
-<section><h2>Limitaciones</h2><p>Las mediciones dependen del sistema operativo, hardware y carga del dispositivo. La distancia es una condición declarada. En ensayos coordinados, los clientes son participantes registrados; interpreta causalidad solo si el diseño experimental controló los factores de confusión.</p></section>
+<section><h2>Limitaciones</h2><p>Las mediciones dependen del sistema operativo, hardware y carga del dispositivo. La distancia BLE por RSSI es aproximada y conserva su incertidumbre. Los clientes son participantes registrados; las muestras repetidas pueden estar correlacionadas. No infieras causalidad sin controlar factores de confusión.</p></section>
 </body></html>''';
   }
 
@@ -271,6 +343,7 @@ ${[for (var i = 0; i < bins.length; i++) '<rect x="${45 + i * 90}" y="${200 - bi
     final files = <String, List<int>>{
       'datos_hotspot.csv': csvBytes,
       'datos_enriquecidos.csv': enrichedBytes,
+      'analisis.csv': utf8.encode(analysisCsv(sessionId, scope: scope)),
       'session.json': jsonBytes,
       'records.jsonl': jsonlBytes,
       'report.html': htmlBytes,
@@ -318,6 +391,7 @@ ${[for (var i = 0; i < bins.length; i++) '<rect x="${45 + i * 90}" y="${200 - bi
         )
         .toList();
     final summary = _summary(sessionId, scope);
+    final report = AnalysisReport(measurements);
     final frequencies = DescriptiveEngine.frequency(
       measurements
           .where((m) => m.success && m.latencyMs != null)
@@ -390,6 +464,42 @@ ${[for (var i = 0; i < bins.length; i++) '<rect x="${45 + i * 90}" y="${200 - bi
         ],
         for (final bin in frequencies)
           [bin.lower, bin.upper, bin.frequency, bin.relative, bin.cumulative],
+      ],
+      'AnalisisClientes': [
+        [
+          'alcance',
+          'cliente_id',
+          'n_total',
+          'n_valid',
+          'n_failed',
+          'n_without_valid_rtt',
+          'media_ms',
+          'mediana_ms',
+          'p95_ms',
+          'sla',
+          'distancia_mediana_m',
+          'incertidumbre_max_m',
+          'interpretacion',
+        ],
+        for (final (index, row) in [
+          report.general,
+          ...report.individual.values,
+        ].indexed)
+          [
+            index == 0 ? 'general' : 'individual',
+            index == 0 ? '' : row.label,
+            row.total,
+            row.valid,
+            row.failed,
+            row.withoutValidRtt,
+            row.stats.mean,
+            row.stats.median,
+            row.stats.p95,
+            row.sla,
+            row.medianDistanceM,
+            row.maxUncertaintyM,
+            row.interpretation,
+          ],
       ],
     };
     final archive = Archive();
@@ -473,12 +583,15 @@ ${[
   }) async {
     final session = repository.sessions().firstWhere((s) => s.id == sessionId);
     final summary = _summary(sessionId, scope);
+    final report = AnalysisReport(_items(sessionId, scope));
+    final serverMetrics = _serverMetrics(sessionId, scope);
     final fontData = await rootBundle.load('assets/fonts/Manrope.ttf');
     final font = pw.Font.ttf(fontData);
     final document = pw.Document();
     document.addPage(
       pw.MultiPage(
         pageFormat: PdfPageFormat.a4,
+        maxPages: 200,
         theme: pw.ThemeData.withFont(base: font, bold: font),
         build: (_) => [
           pw.Text(
@@ -496,7 +609,7 @@ ${[
           pw.SizedBox(height: 20),
           pw.Header(level: 1, text: 'Metodología'),
           pw.Text(
-            'RTT HTTP de aplicación medido con reloj monotónico. Muestras de calentamiento excluidas. Fallos conservados para SLA. Cuartiles tipo 7; varianza muestral n−1; SLA estricto menor que 50 ms.',
+            'RTT de aplicación del protocolo registrado (HTTP, TCP o UDP) medido con reloj monotónico. Muestras de calentamiento excluidas. Fallos conservados para SLA. Cuartiles tipo 7; varianza muestral n−1; SLA estricto menor que 50 ms.',
           ),
           pw.Header(level: 1, text: 'Resumen de resultados'),
           pw.TableHelper.fromTextArray(
@@ -506,9 +619,63 @@ ${[
                 [entry.key, '${entry.value ?? '—'}'],
             ],
           ),
+          pw.Header(level: 1, text: 'Interpretación general'),
+          pw.Text(report.general.interpretation),
+          pw.Header(level: 1, text: 'Análisis individual por cliente'),
+          pw.TableHelper.fromTextArray(
+            headers: [
+              'Cliente',
+              'n',
+              'RTT medio ms',
+              'P95 ms',
+              'SLA',
+              'Distancia m',
+            ],
+            data: [
+              for (final entry in report.individual.entries)
+                [
+                  entry.key,
+                  '${entry.value.total}',
+                  '${entry.value.stats.mean ?? '—'}',
+                  '${entry.value.stats.p95 ?? '—'}',
+                  '${entry.value.sla ?? '—'}',
+                  '${entry.value.medianDistanceM ?? '—'}',
+                ],
+            ],
+          ),
+          for (final entry in report.individual.entries) ...[
+            pw.Header(level: 2, text: 'Cliente ${entry.key}'),
+            pw.Text(entry.value.interpretation),
+          ],
+          pw.Header(level: 1, text: 'Métricas del servidor'),
+          pw.Text(
+            'Duración del ensayo, muestras recibidas, carga útil enviada y recibida, y memoria RSS al finalizar. No incluyen cabeceras de transporte.',
+          ),
+          if (serverMetrics.isEmpty)
+            pw.Text('No hay ensayos coordinados en esta selección.')
+          else
+            pw.TableHelper.fromTextArray(
+              headers: [
+                'Ensayo',
+                'Duración ms',
+                'Muestras',
+                'Enviado B',
+                'Recibido B',
+              ],
+              data: [
+                for (final metric in serverMetrics)
+                  [
+                    '${metric['trial_id']}',
+                    '${metric['server_elapsed_ms'] ?? '—'}',
+                    '${metric['server_received_samples'] ?? '—'}',
+                    '${metric['server_payload_sent_bytes'] ?? '—'}',
+                    '${metric['server_payload_received_bytes'] ?? '—'}',
+                  ],
+              ],
+            ),
           pw.Header(level: 1, text: 'Limitaciones'),
           pw.Text(
-            'La carga del dispositivo, el sistema operativo y el entorno radioeléctrico pueden afectar los resultados. La distancia requiere control experimental externo; en ensayos coordinados los clientes son participantes registrados.',
+            'La carga, el sistema operativo y el entorno radioeléctrico afectan los resultados. La distancia BLE por RSSI es aproximada y se muestra con incertidumbre. Las muestras repetidas pueden estar correlacionadas; estos resultados no demuestran causalidad.',
           ),
         ],
       ),
@@ -527,6 +694,7 @@ ${[
     String sessionId, {
     required String format,
     bool enriched = false,
+    bool analysis = false,
     ExportScope scope = const ExportScope(),
   }) async {
     if (!{
@@ -541,17 +709,19 @@ ${[
       throw ArgumentError.value(format);
     }
     final extension = format;
-    final location = await getSaveLocation(
-      suggestedName: format == 'csv'
-          ? (enriched ? 'datos_enriquecidos.csv' : 'datos_hotspot.csv')
-          : 'lanxis_session.$extension',
-      acceptedTypeGroups: [
-        XTypeGroup(label: format.toUpperCase(), extensions: [extension]),
-      ],
-    );
-    if (location == null) return null;
+    final suggestedName = format == 'csv'
+        ? (analysis
+              ? 'analisis_lanxis.csv'
+              : enriched
+              ? 'datos_enriquecidos.csv'
+              : 'datos_hotspot.csv')
+        : 'lanxis_session.$extension';
     final content = switch (format) {
-      'csv' => utf8.encode(csv(sessionId, enriched: enriched, scope: scope)),
+      'csv' => utf8.encode(
+        analysis
+            ? analysisCsv(sessionId, scope: scope)
+            : csv(sessionId, enriched: enriched, scope: scope),
+      ),
       'json' => utf8.encode(json(sessionId, scope: scope)),
       'jsonl' => utf8.encode(jsonl(sessionId, scope: scope)),
       'html' => utf8.encode(html(sessionId, scope: scope)),
@@ -560,25 +730,51 @@ ${[
       'pdf' => await pdf(sessionId, scope: scope),
       _ => throw ArgumentError.value(format),
     };
-    await XFile.fromData(
-      content,
-      mimeType: switch (format) {
-        'csv' => 'text/csv',
-        'json' => 'application/json',
-        'jsonl' => 'application/x-ndjson',
-        'html' => 'text/html',
-        'zip' => 'application/zip',
-        'xlsx' =>
-          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        'pdf' => 'application/pdf',
-        _ => 'application/octet-stream',
-      },
-    ).saveTo(location.path);
+    final mime = switch (format) {
+      'csv' => 'text/csv',
+      'json' => 'application/json',
+      'jsonl' => 'application/x-ndjson',
+      'html' => 'text/html',
+      'zip' => 'application/zip',
+      'xlsx' =>
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'pdf' => 'application/pdf',
+      _ => 'application/octet-stream',
+    };
+    String? savedLocation;
+    if (Platform.isAndroid) {
+      final directory = await getTemporaryDirectory();
+      final temporary = File(
+        '${directory.path}/lanxis-export-${DateTime.now().microsecondsSinceEpoch}.$extension',
+      );
+      try {
+        await temporary.writeAsBytes(content, flush: true);
+        savedLocation = await const MethodChannel('mx.lanxis/export')
+            .invokeMethod<String>('saveDocument', {
+              'name': suggestedName,
+              'mime': mime,
+              'path': temporary.path,
+            });
+      } finally {
+        if (await temporary.exists()) await temporary.delete();
+      }
+    } else {
+      final location = await getSaveLocation(
+        suggestedName: suggestedName,
+        acceptedTypeGroups: [
+          XTypeGroup(label: format.toUpperCase(), extensions: [extension]),
+        ],
+      );
+      if (location == null) return null;
+      await XFile.fromData(content, mimeType: mime).saveTo(location.path);
+      savedLocation = location.path;
+    }
+    if (savedLocation == null) return null;
     repository.addEvent(
       'export_$format',
       sessionId: sessionId,
       metadataJson: jsonEncode({'enriched': enriched, 'scope': scope.toJson()}),
     );
-    return location.path;
+    return savedLocation;
   }
 }

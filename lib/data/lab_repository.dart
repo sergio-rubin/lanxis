@@ -186,6 +186,35 @@ class LabRepository {
         _db.execute('PRAGMA foreign_keys = ON');
       }
     }
+    if (version < 6) {
+      _db.execute('BEGIN IMMEDIATE');
+      try {
+        final hasOutbox = _db
+            .select(
+              "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'result_outbox'",
+            )
+            .isNotEmpty;
+        if (hasOutbox) {
+          _db.execute(
+            "ALTER TABLE result_outbox ADD COLUMN state TEXT NOT NULL DEFAULT 'pending'",
+          );
+        } else {
+          _db.execute('''CREATE TABLE result_outbox (
+            id TEXT PRIMARY KEY, server_url TEXT NOT NULL,
+            payload_json TEXT NOT NULL, created_utc TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending'
+          )''');
+          _db.execute(
+            'CREATE INDEX idx_result_outbox_server ON result_outbox(server_url, created_utc)',
+          );
+        }
+        _db.execute('PRAGMA user_version = 6');
+        _db.execute('COMMIT');
+      } catch (_) {
+        _db.execute('ROLLBACK');
+        rethrow;
+      }
+    }
   }
 
   String get clientIdentity {
@@ -212,14 +241,32 @@ class LabRepository {
 
   List<Map<String, Object?>> pendingResults(String serverUrl) => _db
       .select(
-        'SELECT * FROM result_outbox WHERE server_url = ? ORDER BY created_utc, rowid',
+        "SELECT * FROM result_outbox WHERE server_url = ? AND state = 'pending' ORDER BY created_utc, rowid",
         [serverUrl],
       )
       .map((row) => Map<String, Object?>.from(row))
       .toList();
 
   int get pendingResultCount =>
-      _db.select('SELECT COUNT(*) AS n FROM result_outbox').first['n'] as int;
+      _db
+              .select(
+                "SELECT COUNT(*) AS n FROM result_outbox WHERE state = 'pending'",
+              )
+              .first['n']
+          as int;
+
+  int get rejectedResultCount =>
+      _db
+              .select(
+                "SELECT COUNT(*) AS n FROM result_outbox WHERE state = 'rejected'",
+              )
+              .first['n']
+          as int;
+
+  void markResultRejected(String id) => _db.execute(
+    "UPDATE result_outbox SET state = 'rejected' WHERE id = ?",
+    [id],
+  );
 
   List<ScenarioTemplate> scenarioTemplates() => _db
       .select('SELECT * FROM scenario_templates ORDER BY created_utc DESC')

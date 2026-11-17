@@ -34,10 +34,10 @@ class ScenarioPlanner {
       throw ArgumentError('Ambiente o carga inválidos');
     }
     final multi = index > 3;
-    final clients = multi && readyClients >= 3
-        ? readyClients.clamp(3, 5)
+    final clients = multi && readyClients >= 2
+        ? readyClients.clamp(2, 5)
         : multi
-        ? 4
+        ? 2
         : 1;
     final payload = switch (load) {
       'latency' => 0,
@@ -64,7 +64,7 @@ class ScenarioPlanner {
     return ScenarioPreview(
       config: config,
       readyClients: readyClients,
-      requiredClients: multi ? 3 : 1,
+      requiredClients: multi ? 2 : 1,
       description:
           '${multi ? 'Multicliente' : 'Un cliente'} · '
           '${target.toStringAsFixed(0)} m objetivo · '

@@ -26,8 +26,8 @@ void main() {
       load: 'balanced',
       readyClients: 2,
     );
-    expect(waiting.config.clients, 4);
-    expect(waiting.enoughParticipants, false);
+    expect(waiting.config.clients, 2);
+    expect(waiting.enoughParticipants, true);
   });
 
   test(

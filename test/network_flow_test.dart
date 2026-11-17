@@ -50,6 +50,14 @@ void main() {
       find.widgetWithText(TextField, 'Código de seis dígitos'),
       '715289',
     );
+    final codeFocus = tester
+        .widget<EditableText>(
+          find.descendant(
+            of: find.widgetWithText(TextField, 'Código de seis dígitos'),
+            matching: find.byType(EditableText),
+          ),
+        )
+        .focusNode;
     await tester.ensureVisible(find.text('Conectar y comprobar'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Conectar y comprobar'));
@@ -57,6 +65,7 @@ void main() {
     expect(find.text('Conectado a LANXIS'), findsOneWidget);
     await tester.tap(find.text('Análisis').last);
     await tester.pumpAndSettle();
+    expect(codeFocus.hasFocus, false);
     await tester.drag(find.byType(PageView), const Offset(330, 0));
     await tester.pumpAndSettle();
     expect(find.text('Conectado a LANXIS'), findsOneWidget);
@@ -85,6 +94,8 @@ void main() {
       ),
     );
     await tester.tap(find.text('Red local').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Iniciar servidor y medir'));
     await tester.pumpAndSettle();
     await tester.ensureVisible(find.textContaining('Configurar y medir'));
     await tester.pumpAndSettle();
@@ -119,5 +130,7 @@ void main() {
     await tester.tap(find.text('Crear').last);
     await tester.pumpAndSettle();
     expect(repo.scenarioTemplates().single.name, 'Patio personalizado');
+    await tester.pump(const Duration(seconds: 21));
+    await tester.pumpAndSettle();
   });
 }

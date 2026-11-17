@@ -9,12 +9,14 @@ class HotspotState {
     required this.active,
     this.ssid,
     this.passphrase,
+    this.security = 'WPA',
     this.reason,
   });
   final bool supported;
   final bool active;
   final String? ssid;
   final String? passphrase;
+  final String security;
   final String? reason;
 }
 
@@ -91,6 +93,7 @@ class PlatformHotspotAdapter implements HotspotAdapter {
       active: data['active'] == true,
       ssid: data['ssid'] as String?,
       passphrase: data['passphrase'] as String?,
+      security: data['security'] as String? ?? 'WPA',
       reason: data['reason'] as String?,
     );
   }

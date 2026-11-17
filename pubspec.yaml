@@ -1,7 +1,7 @@
 name: lanxis
 description: Laboratorio local de experimentación e inferencia de redes.
 publish_to: none
-version: 0.1.0+1
+version: 0.1.0+4016
 
 environment:
   sdk: ^3.14.0
@@ -23,6 +23,7 @@ dependencies:
   pdf: ^3.13.1
   dbus: ^0.8.0
   bonsoir: ^7.1.6
+  qr_flutter: ^4.1.0
 
 dev_dependencies:
   flutter_test:

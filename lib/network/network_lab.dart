@@ -5,6 +5,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:bonsoir/bonsoir.dart';
+import 'package:flutter/services.dart';
 import 'package:uuid/uuid.dart';
 
 import '../core/models.dart';
@@ -30,6 +31,7 @@ class _CoordinatedJob {
     required this.trialId,
     required this.config,
     required this.clients,
+    required this.serverDistances,
   }) : startUtc = DateTime.now().toUtc().add(const Duration(seconds: 2));
   final String id;
   final LabSession session;
@@ -38,6 +40,7 @@ class _CoordinatedJob {
   final String trialId;
   final TrialConfig config;
   final Set<String> clients;
+  final Map<String, DistanceObservation> serverDistances;
   final DateTime startUtc;
   final Set<String> delivered = {};
   final Set<String> completed = {};
@@ -52,6 +55,7 @@ class NetworkLab {
   static const maxDownloadBytes = 100 * 1024 * 1024;
   static const mdnsServiceType = '_lanxis._tcp';
   static const _uuid = Uuid();
+  static const _participantService = MethodChannel('mx.lanxis/participant');
   HttpServer? _server;
   TcpTransferServer? _tcpTransfer;
   UdpEchoServer? _udpEcho;
@@ -59,6 +63,9 @@ class NetworkLab {
   BonsoirBroadcast? _mdnsBroadcast;
   Future<void>? _mdnsStartTask;
   BleBeacon? _bleBeacon;
+  BleBeacon? _participantBeacon;
+  final Map<String, String> _clientBeaconTokens = {};
+  String? participantBeaconError;
   String? bleBeaconError;
   String? mdnsError;
   bool get mdnsActive => _mdnsBroadcast != null;
@@ -72,10 +79,10 @@ class NetworkLab {
   _CoordinatedJob? _activeJob;
   final Map<String, _CoordinatedJob> _recentJobs = {};
   bool _participating = false;
-  final Set<String> _staleResultIds = {};
   Future<void>? _participantTask;
   String? lastParticipantError;
   String? lastDistanceReason;
+  UdpBurstResult? lastUdpBurstResult;
 
   bool get isServing => _server != null;
   int? get port => _server?.port;
@@ -84,6 +91,11 @@ class NetworkLab {
   int get readyWorkers => _readyWorkers.entries
       .where((e) => DateTime.now().toUtc().difference(e.value).inSeconds < 8)
       .length;
+  int get deliveredWorkers => _activeJob?.delivered.length ?? 0;
+  int get completedWorkers => _activeJob?.completed.length ?? 0;
+  int get coordinatedSamples => _activeJob == null
+      ? 0
+      : repository.trialMeasurementCount(_activeJob!.trialId);
   bool get isParticipating => _participating;
 
   Future<int> startServer({int port = 8040}) async {
@@ -207,6 +219,7 @@ class NetworkLab {
     _pairCode = null;
     _clients.clear();
     _readyWorkers.clear();
+    _clientBeaconTokens.clear();
     _recentJobs.clear();
   }
 
@@ -464,11 +477,20 @@ class NetworkLab {
             data = null;
           }
           final id = data is Map ? data['client_id'] : null;
+          final beaconToken = data is Map
+              ? data['distance_beacon_token']
+              : null;
           if (id is! String || id.length < 8 || id.length > 128) {
             response.statusCode = HttpStatus.badRequest;
             response.write(jsonEncode({'error': 'invalid_client_id'}));
           } else {
             _clients[id] = DateTime.now().toUtc();
+            if (beaconToken is String &&
+                RegExp(r'^[0-9a-fA-F]{12}$').hasMatch(beaconToken)) {
+              _clientBeaconTokens[id] = beaconToken;
+            } else {
+              _clientBeaconTokens.remove(id);
+            }
             response.write(
               jsonEncode({
                 'client_id': id,
@@ -555,11 +577,17 @@ class NetworkLab {
                     requestId: raw['request_id'] as String,
                     scenarioId: job.config.scenarioId,
                     clients: job.config.clients,
-                    distanceM: (raw['distancia_m'] as num?)?.toDouble(),
-                    distanceSource:
-                        raw['origen_distancia'] as String? ?? 'unknown',
+                    distanceM:
+                        job.serverDistances[id]?.meters ??
+                        (raw['distancia_m'] as num?)?.toDouble(),
+                    distanceSource: job.serverDistances[id]?.meters != null
+                        ? 'server_${job.serverDistances[id]!.source}'
+                        : raw['origen_distancia'] as String? ?? 'unknown',
                     distanceUncertaintyM:
-                        (raw['incertidumbre_distancia_m'] as num?)?.toDouble(),
+                        job.serverDistances[id]?.meters != null
+                        ? job.serverDistances[id]!.uncertaintyM
+                        : (raw['incertidumbre_distancia_m'] as num?)
+                              ?.toDouble(),
                     targetDistanceM: (raw['distancia_objetivo_m'] as num?)
                         ?.toDouble(),
                     environment: raw['ambiente'] as String? ?? 'unknown',
@@ -729,7 +757,13 @@ class NetworkLab {
       final request = await client.postUrl(base.resolve('/register'));
       request.headers.set('X-Lanxis-Code', code);
       request.headers.contentType = ContentType.json;
-      request.write(jsonEncode({'client_id': clientId}));
+      request.write(
+        jsonEncode({
+          'client_id': clientId,
+          if (_participantBeacon != null)
+            'distance_beacon_token': _participantBeacon!.token,
+        }),
+      );
       final response = await request.close().timeout(
         const Duration(seconds: 5),
       );
@@ -745,8 +779,22 @@ class NetworkLab {
 
   Future<void> startParticipant(Uri base, String code) async {
     if (_participating) return;
-    await register(base, code);
-    _staleResultIds.clear();
+    try {
+      _participantBeacon = await BleBeacon.start();
+      participantBeaconError = null;
+    } catch (error) {
+      participantBeaconError = '$error';
+    }
+    try {
+      await register(base, code);
+      if (Platform.isAndroid) {
+        await _participantService.invokeMethod<void>('start');
+      }
+    } catch (_) {
+      await _participantBeacon?.close();
+      _participantBeacon = null;
+      rethrow;
+    }
     lastParticipantError = null;
     _participating = true;
     _participantTask = _participantLoop(base, code);
@@ -756,6 +804,11 @@ class NetworkLab {
     _participating = false;
     await _participantTask;
     _participantTask = null;
+    await _participantBeacon?.close();
+    _participantBeacon = null;
+    if (Platform.isAndroid) {
+      await _participantService.invokeMethod<void>('stop');
+    }
   }
 
   Future<void> _participantLoop(Uri base, String code) async {
@@ -844,7 +897,6 @@ class NetworkLab {
   Future<void> _drainResultOutbox(Uri base, String code) async {
     for (final row in repository.pendingResults(base.toString())) {
       final id = row['id'] as String;
-      if (_staleResultIds.contains(id)) continue;
       final payload = Map<String, Object?>.from(
         jsonDecode(row['payload_json'] as String) as Map,
       );
@@ -853,8 +905,8 @@ class NetworkLab {
         repository.acknowledgeResult(id);
       } on HttpException catch (error) {
         if (!error.message.contains('409')) rethrow;
-        _staleResultIds.add(id);
-        lastParticipantError = 'Un lote pendiente pertenece a un ensayo que el servidor ya no conserva.';
+        repository.markResultRejected(id);
+        lastParticipantError = 'El servidor ya no conserva el ensayo de un lote. La copia local permanece disponible.';
       }
     }
   }
@@ -925,9 +977,9 @@ class NetworkLab {
     if (session.status != 'active' || phase.status != 'active') {
       throw StateError('La sesión y la fase deben estar activas');
     }
-    if (!isServing || config.clients < 2 || _activeJob != null) {
+    if (!isServing || config.clients < 1 || _activeJob != null) {
       throw StateError(
-        'Inicia el servidor y elige un ensayo multicliente libre',
+        'Inicia el servidor y espera a que termine el ensayo actual',
       );
     }
     if (config.count < 1 ||
@@ -937,8 +989,9 @@ class NetworkLab {
         (config.protocol == 'udp' &&
             config.payloadBytes > UdpEchoServer.maxPayloadBytes) ||
         config.timeoutMs < 100 ||
-        !{'http', 'tcp', 'udp'}.contains(config.protocol) ||
-        (config.protocol == 'udp' && config.direction != 'download') ||
+        !{'http', 'tcp', 'udp', 'udp-burst'}.contains(config.protocol) ||
+        (['udp', 'udp-burst'].contains(config.protocol) &&
+            config.direction != 'download') ||
         config.intervalMs < 0 ||
         !{'download', 'upload'}.contains(config.direction) ||
         (config.direction == 'upload' && config.payloadBytes == 0)) {
@@ -955,8 +1008,20 @@ class NetworkLab {
         'Se necesitan ${config.clients} participantes activos; hay ${ready.length}.',
       );
     }
+    final serverDistances = <String, DistanceObservation>{};
+    for (final id in ready) {
+      final token = _clientBeaconTokens[id];
+      if (token == null) continue;
+      final observation = await const DistanceProbe().measure(
+        Uri.parse('http://127.0.0.1'),
+        beaconToken: token,
+        environment: config.environment,
+      );
+      if (observation.meters != null) serverDistances[id] = observation;
+    }
     final testId = repository.createTest(phase.id, config.scenarioId, config);
     final trialId = repository.startTrial(testId);
+    final serverTimer = Stopwatch()..start();
     final job = _CoordinatedJob(
       id: _uuid.v4(),
       session: session,
@@ -965,6 +1030,7 @@ class NetworkLab {
       trialId: trialId,
       config: config,
       clients: ready,
+      serverDistances: serverDistances,
     );
     _activeJob = job;
     repository.addEvent(
@@ -973,16 +1039,23 @@ class NetworkLab {
       phaseId: phase.id,
       testId: testId,
       trialId: trialId,
-      metadataJson: jsonEncode({'client_ids': ready.toList()}),
+      metadataJson: jsonEncode({
+        'client_ids': ready.toList(),
+        'server_distance_m': {
+          for (final entry in serverDistances.entries)
+            entry.key: entry.value.meters,
+        },
+      }),
     );
     var status = 'finished';
     try {
       final estimatedMs =
           (config.count + config.warmup) *
-          (config.timeoutMs + config.intervalMs) *
-          2;
+              (config.timeoutMs + config.intervalMs) *
+              2 +
+          30000;
       await job.done.future.timeout(
-        Duration(milliseconds: estimatedMs.clamp(30000, 3600000)),
+        Duration(milliseconds: estimatedMs.clamp(60000, 3600000)),
       );
       final actual = repository.trialMeasurementCount(trialId);
       if (actual != config.count * config.clients) {
@@ -996,6 +1069,11 @@ class NetworkLab {
       status = 'failed';
       rethrow;
     } finally {
+      serverTimer.stop();
+      final serverSamples = repository
+          .measurements(session.id, includeWarmup: true)
+          .where((m) => m.trialId == trialId)
+          .toList();
       _activeJob = null;
       job.reconciled = status == 'finished';
       _recentJobs[job.id] = job;
@@ -1010,6 +1088,23 @@ class NetworkLab {
         testId: testId,
         trialId: trialId,
         severity: status == 'finished' ? 'info' : 'warning',
+        metadataJson: jsonEncode({
+          'server_elapsed_ms': serverTimer.elapsedMilliseconds,
+          'server_received_samples': serverSamples.length,
+          'server_payload_sent_bytes': serverSamples.fold<int>(
+            0,
+            (sum, m) => sum + m.bytesReceived,
+          ),
+          'server_payload_received_bytes': serverSamples.fold<int>(
+            0,
+            (sum, m) => sum + m.bytesSent,
+          ),
+          'server_rss_bytes_end': ProcessInfo.currentRss,
+          'server_distance_m': {
+            for (final entry in serverDistances.entries)
+              entry.key: entry.value.meters,
+          },
+        }),
       );
     }
   }
@@ -1049,6 +1144,7 @@ class NetworkLab {
     bool Function()? cancelled,
     bool coordinated = false,
   }) async {
+    lastUdpBurstResult = null;
     if (session.status != 'active' || phase.status != 'active') {
       throw StateError('La sesión y la fase deben estar activas');
     }
@@ -1060,12 +1156,16 @@ class NetworkLab {
         config.count > 100000 ||
         config.payloadBytes < 0 ||
         config.payloadBytes > maxDownloadBytes ||
-        (config.protocol == 'udp' &&
+        ({'udp', 'udp-burst'}.contains(config.protocol) &&
             config.payloadBytes > UdpEchoServer.maxPayloadBytes) ||
+        (config.protocol == 'udp-burst' &&
+            (config.count + config.warmup > 1000 ||
+                config.intervalMs > 1000)) ||
         config.intervalMs < 0 ||
         config.timeoutMs < 100 ||
-        !{'http', 'tcp', 'udp'}.contains(config.protocol) ||
-        (config.protocol == 'udp' && config.direction != 'download') ||
+        !{'http', 'tcp', 'udp', 'udp-burst'}.contains(config.protocol) ||
+        ({'udp', 'udp-burst'}.contains(config.protocol) &&
+            config.direction != 'download') ||
         !{'download', 'upload'}.contains(config.direction) ||
         (config.direction == 'upload' && config.payloadBytes == 0)) {
       throw ArgumentError('Configuración fuera de límites');
@@ -1084,10 +1184,15 @@ class NetworkLab {
     if (config.protocol == 'tcp' && tcpPort == null) {
       throw UnsupportedError('Este servidor no ofrece transferencias TCP');
     }
-    if (config.protocol == 'udp' && udpPort == null) {
+    if ({'udp', 'udp-burst'}.contains(config.protocol) && udpPort == null) {
       throw UnsupportedError('Este servidor no ofrece eco UDP');
     }
-    final observation = config.distanceM == null
+    final observation = coordinated && config.distanceM == null
+        ? const DistanceObservation(
+            source: 'server_pending',
+            reason: 'La distancia de este ensayo la mide el servidor.',
+          )
+        : config.distanceM == null
         ? await const DistanceProbe().measure(
             base,
             beaconToken: capabilities['distance_beacon_token'] as String?,
@@ -1111,7 +1216,9 @@ class NetworkLab {
       effectiveConfig,
     );
     final trialId = repository.startTrial(testId);
-    if (observation.meters == null && observation.reason != null) {
+    if (!coordinated &&
+        observation.meters == null &&
+        observation.reason != null) {
       repository.addEvent(
         'distance_unavailable',
         sessionId: session.id,
@@ -1136,6 +1243,20 @@ class NetworkLab {
           'model': 'log_distance_uncalibrated_v1',
           'environment': config.environment,
         }),
+      );
+    }
+    if (config.protocol == 'udp-burst') {
+      return _runUdpBurst(
+        base: base,
+        code: code,
+        session: session,
+        phase: phase,
+        config: effectiveConfig,
+        testId: testId,
+        trialId: trialId,
+        udpPort: udpPort!,
+        cancelled: cancelled,
+        onProgress: onProgress,
       );
     }
     final client = HttpClient()
@@ -1339,5 +1460,122 @@ class NetworkLab {
       );
     }
     return results;
+  }
+
+  Future<List<Measurement>> _runUdpBurst({
+    required Uri base,
+    required String code,
+    required LabSession session,
+    required LabPhase phase,
+    required TrialConfig config,
+    required String testId,
+    required String trialId,
+    required int udpPort,
+    required bool Function()? cancelled,
+    required void Function(int completed, int total)? onProgress,
+  }) async {
+    var status = 'finished';
+    final results = <Measurement>[];
+    try {
+      final burst = await UdpEchoClient.burst(
+        host: base.host,
+        port: udpPort,
+        code: code,
+        requestIds: [
+          for (var i = 0; i < config.count + config.warmup; i++) _uuid.v4(),
+        ],
+        payloadBytes: config.payloadBytes,
+        timeout: Duration(milliseconds: config.timeoutMs),
+        intervalMs: config.intervalMs,
+        cancelled: cancelled,
+        onSent: (sent, _) => onProgress?.call(
+          (sent - config.warmup).clamp(0, config.count),
+          config.count,
+        ),
+      );
+      lastUdpBurstResult = burst;
+      if (burst.cancelled) status = 'cancelled';
+      double? previousRtt;
+      for (var i = 0; i < burst.packets.length; i++) {
+        final packet = burst.packets[i];
+        final rtt = packet.latencyMs;
+        final jitter = rtt != null && previousRtt != null
+            ? (rtt - previousRtt).abs()
+            : null;
+        if (rtt != null) previousRtt = rtt;
+        final item = Measurement(
+          id: _uuid.v4(),
+          sessionId: session.id,
+          phaseId: phase.id,
+          testId: testId,
+          trialId: trialId,
+          requestId: packet.requestId,
+          scenarioId: config.scenarioId,
+          clients: config.clients,
+          distanceM: config.distanceM,
+          distanceSource: config.distanceSource,
+          distanceUncertaintyM: config.distanceUncertaintyM,
+          targetDistanceM: config.targetDistanceM,
+          environment: config.environment,
+          timestampUtc: packet.sentUtc,
+          success: packet.received,
+          bytesReceived: packet.receivedBytes,
+          bytesSent: packet.sentBytes,
+          latencyMs: rtt,
+          jitterMs: jitter,
+          speedMbps: null,
+          httpStatus: null,
+          rssiDbm: null,
+          error: packet.received
+              ? null
+              : 'Sin eco UDP dentro de ${config.timeoutMs} ms',
+          warmup: i < config.warmup,
+          protocol: 'udp-burst',
+          clientId: clientId,
+        );
+        repository.addMeasurement(item);
+        if (!item.warmup) {
+          results.add(item);
+        }
+      }
+      repository.addEvent(
+        'udp_burst_summary',
+        sessionId: session.id,
+        phaseId: phase.id,
+        testId: testId,
+        trialId: trialId,
+        metadataJson: jsonEncode({
+          'sent': burst.packets.length,
+          'received': burst.packets.length - burst.lost,
+          'lost': burst.lost,
+          'reordered': burst.reordered,
+          'duplicates': burst.duplicates,
+          'invalid': burst.invalid,
+          'interval_ms': config.intervalMs,
+          'packets': [
+            for (var i = 0; i < burst.packets.length; i++)
+              {
+                'send_index': i,
+                'request_id': burst.packets[i].requestId,
+                'receive_order': burst.packets[i].receiveOrder,
+              },
+          ],
+        }),
+      );
+      return results;
+    } catch (_) {
+      status = 'failed';
+      rethrow;
+    } finally {
+      repository.finishTrial(trialId, status);
+      repository.addEvent(
+        'trial_$status',
+        sessionId: session.id,
+        phaseId: phase.id,
+        testId: testId,
+        trialId: trialId,
+        severity: status == 'failed' ? 'error' : 'info',
+      );
+    }
   }
 }

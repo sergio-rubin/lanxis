@@ -116,4 +116,77 @@ void main() {
     expect((trialData['trials'] as List).length, 1);
     expect((trialData['measurements'] as List).length, 1);
   });
+
+  test(
+    'general and individual analyses agree across JSON, CSV, XLSX and PDF',
+    () async {
+      final repo = LabRepository.inMemory();
+      addTearDown(repo.dispose);
+      final session = repo.createSession('Dos clientes');
+      final phase = repo.createPhase(session.id, 'Fase');
+      final testId = repo.createTest(
+        phase.id,
+        'E4',
+        const TrialConfig(
+          scenarioId: 'E4',
+          clients: 2,
+          distanceM: null,
+          count: 2,
+        ),
+      );
+      final trialId = repo.startTrial(testId);
+      for (final (id, latency) in [('cliente-a', 10.0), ('cliente-b', 80.0)]) {
+        repo.addMeasurement(
+          Measurement(
+            id: 'm-$id',
+            sessionId: session.id,
+            phaseId: phase.id,
+            testId: testId,
+            trialId: trialId,
+            requestId: 'r-$id',
+            scenarioId: 'E4',
+            clients: 2,
+            distanceM: .5,
+            distanceSource: 'server_ble_rssi_estimate',
+            distanceUncertaintyM: 1.5,
+            timestampUtc: DateTime.utc(2026),
+            success: true,
+            bytesReceived: 32,
+            latencyMs: latency,
+            clientId: id,
+          ),
+        );
+      }
+      final service = ExportService(repo);
+      final data = jsonDecode(service.json(session.id)) as Map;
+      final analysis = data['analysis'] as Map;
+      expect((analysis['general'] as Map)['n_total'], 2);
+      expect((analysis['individual'] as Map).length, 2);
+      expect(
+        (analysis['general'] as Map)['interpretation'],
+        contains('incertidumbre'),
+      );
+      final csv = service.analysisCsv(session.id);
+      expect(csv.split('\n').where((line) => line.isNotEmpty).length, 4);
+      expect(csv, contains('cliente-a'));
+      expect(service.html(session.id), contains('Análisis por cliente'));
+      final workbook = ZipDecoder().decodeBytes(service.xlsx(session.id));
+      expect(
+        utf8.decode(workbook.findFile('xl/workbook.xml')!.content),
+        contains('AnalisisClientes'),
+      );
+      expect((await service.pdf(session.id)).take(4), [37, 80, 68, 70]);
+      final client = jsonDecode(
+        service.json(
+          session.id,
+          scope: const ExportScope(clientId: 'cliente-a'),
+        ),
+      ) as Map;
+      expect((client['measurements'] as List).length, 1);
+      expect(
+        ((client['analysis'] as Map)['general'] as Map)['mean_latency_ms'],
+        10,
+      );
+    },
+  );
 }

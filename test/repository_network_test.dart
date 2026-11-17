@@ -74,7 +74,18 @@ void main() {
     expect(second.pendingResults('http://127.0.0.1:8040').single['id'], queued);
     second.acknowledgeResult(queued);
     expect(second.pendingResultCount, 0);
+    final obsolete = second.queueResult(
+      'http://127.0.0.1:8040',
+      '{"job_id":"old"}',
+    );
+    second.markResultRejected(obsolete);
+    expect(second.pendingResultCount, 0);
+    expect(second.rejectedResultCount, 1);
     second.dispose();
+    final third = LabRepository.openAt(file);
+    expect(third.rejectedResultCount, 1);
+    expect(third.pendingResults('http://127.0.0.1:8040'), isEmpty);
+    third.dispose();
   });
 
   test('session hierarchy and duplicate request protection', () {
@@ -324,6 +335,46 @@ void main() {
     expect(results.every((m) => m.bytesSent == m.bytesReceived), true);
   });
 
+  test('UDP burst persists packet order, loss and measured RTT', () async {
+    final repo = LabRepository.inMemory();
+    final network = NetworkLab(repo);
+    addTearDown(() async {
+      await network.stopServer();
+      repo.dispose();
+    });
+    final port = await network.startServer(port: 0);
+    final session = repo.createSession('Ráfaga UDP');
+    final phase = repo.createPhase(session.id, 'Orden de llegada');
+    final results = await network.runTrial(
+      base: Uri.parse('http://127.0.0.1:$port'),
+      code: network.pairCode!,
+      session: session,
+      phase: phase,
+      config: const TrialConfig(
+        scenarioId: 'Libre',
+        clients: 1,
+        distanceM: 0,
+        count: 4,
+        warmup: 1,
+        intervalMs: 0,
+        timeoutMs: 500,
+        payloadBytes: 16,
+        protocol: 'udp-burst',
+      ),
+    );
+    expect(results, hasLength(4));
+    expect(results.every((m) => m.success && m.protocol == 'udp-burst'), true);
+    expect(network.lastUdpBurstResult?.lost, 0);
+    final event = repo
+        .eventsForSession(session.id)
+        .firstWhere((item) => item['type'] == 'udp_burst_summary');
+    final metadata = jsonDecode(event['metadata_json'] as String) as Map;
+    expect(metadata['sent'], 5);
+    expect(metadata['received'], 5);
+    expect(metadata['lost'], 0);
+    expect(metadata['packets'], hasLength(5));
+  });
+
   test(
     'two participant instances coordinate E4 and preserve provenance',
     () async {
@@ -388,4 +439,51 @@ void main() {
     },
     timeout: const Timeout(Duration(seconds: 45)),
   );
+
+  test('server starts an E1 trial for one passive client and records server metrics', () async {
+    final serverRepo = LabRepository.inMemory();
+    final clientRepo = LabRepository.inMemory();
+    final server = NetworkLab(serverRepo);
+    final client = NetworkLab(clientRepo);
+    addTearDown(() async {
+      await client.stopParticipant();
+      await server.stopServer();
+      clientRepo.dispose();
+      serverRepo.dispose();
+    });
+    final port = await server.startServer(port: 0);
+    final base = Uri.parse('http://127.0.0.1:$port');
+    await client.startParticipant(base, server.pairCode!);
+    for (var i = 0; i < 50 && server.readyWorkers < 1; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    expect(server.readyWorkers, 1);
+    final session = serverRepo.createSession('Servidor E1');
+    final phase = serverRepo.createPhase(session.id, 'Única');
+    final actual = await server.runCoordinatedTrial(
+      session: session,
+      phase: phase,
+      config: const TrialConfig(
+        scenarioId: 'E1',
+        clients: 1,
+        distanceM: null,
+        count: 2,
+        warmup: 0,
+        intervalMs: 0,
+      ),
+    );
+    expect(actual, 2);
+    expect(
+      serverRepo
+          .measurements(session.id)
+          .every((m) => m.clientId == client.clientId),
+      true,
+    );
+    final completed = serverRepo
+        .eventsForSession(session.id)
+        .firstWhere((e) => e['type'] == 'coordinated_trial_finished');
+    final metadata = jsonDecode(completed['metadata_json'] as String) as Map;
+    expect(metadata['server_received_samples'], 2);
+    expect(metadata['server_elapsed_ms'], isA<int>());
+  }, timeout: const Timeout(Duration(seconds: 45)));
 }

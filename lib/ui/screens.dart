@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../core/models.dart';
@@ -13,7 +15,9 @@ import '../data/lab_repository.dart';
 import '../export/export_service.dart';
 import '../network/network_lab.dart';
 import '../platform/hotspot_adapter.dart';
+import '../platform/wifi_qr.dart';
 import '../science/descriptive.dart';
+import '../science/analysis_report.dart';
 import '../science/inference.dart';
 import '../science/modeling.dart';
 import 'distribution_explorer.dart';
@@ -52,6 +56,7 @@ class _LabShellState extends State<LabShell> {
 
   void selectPage(int next) {
     if (next == index) return;
+    FocusManager.instance.primaryFocus?.unfocus();
     setState(() => index = next);
     if (MediaQuery.disableAnimationsOf(context)) {
       pages.jumpToPage(next);
@@ -215,7 +220,10 @@ class _LabShellState extends State<LabShell> {
                       Expanded(
                         child: PageView(
                           controller: pages,
-                          onPageChanged: (next) => setState(() => index = next),
+                          onPageChanged: (next) {
+                            FocusManager.instance.primaryFocus?.unfocus();
+                            setState(() => index = next);
+                          },
                           children: screens,
                         ),
                       ),
@@ -247,6 +255,7 @@ class _HypothesisDetails extends StatelessWidget {
   @override
   Widget build(BuildContext context) => ExpansionTile(
     tilePadding: EdgeInsets.zero,
+    onExpansionChanged: (_) => FocusManager.instance.primaryFocus?.unfocus(),
     title: Text('${result.method} · ${result.decision}'),
     subtitle: Text(
       'p = ${result.pValue.toStringAsPrecision(4)} · n = ${result.sampleSize}',
@@ -329,6 +338,7 @@ class Dashboard extends StatelessWidget {
 
   Future<void> _newSession(BuildContext context) async {
     final controller = TextEditingController();
+    FocusManager.instance.primaryFocus?.unfocus();
     final name = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
@@ -355,6 +365,9 @@ class Dashboard extends StatelessWidget {
       ),
     );
     controller.dispose();
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => FocusManager.instance.primaryFocus?.unfocus(),
+    );
     if (name == null || name.trim().isEmpty) return;
     final item = repository.createSession(name);
     onChanged();
@@ -597,6 +610,7 @@ class _SessionPageState extends State<SessionPage> {
   bool exporting = false;
   Future<void> _addPhase() async {
     final controller = TextEditingController();
+    FocusManager.instance.primaryFocus?.unfocus();
     final name = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
@@ -620,6 +634,9 @@ class _SessionPageState extends State<SessionPage> {
       ),
     );
     controller.dispose();
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => FocusManager.instance.primaryFocus?.unfocus(),
+    );
     if (name == null || name.trim().isEmpty) return;
     widget.repository.createPhase(widget.session.id, name);
     widget.onChanged();
@@ -632,8 +649,15 @@ class _SessionPageState extends State<SessionPage> {
       final path = await ExportService(widget.repository)
           .save(widget.session.id, format: format, enriched: enriched);
       if (mounted && path != null) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Exportado a $path')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              Platform.isAndroid
+                  ? 'Documento guardado en Archivos.'
+                  : 'Exportado a $path',
+            ),
+          ),
+        );
       }
     } catch (e) {
       if (mounted) {
@@ -812,6 +836,8 @@ class _SessionPageState extends State<SessionPage> {
                         child: AcrylicPanel(
                           child: ExpansionTile(
                             tilePadding: EdgeInsets.zero,
+                            onExpansionChanged: (_) =>
+                                FocusManager.instance.primaryFocus?.unfocus(),
                             title: Text(
                               phase.name,
                               style: Theme.of(context).textTheme.titleLarge,
@@ -938,6 +964,7 @@ class _NetworkScreenState extends State<NetworkScreen>
   bool cancel = false;
   bool coordinating = false;
   int progress = 0;
+  int expectedSamples = 0;
   String? feedback;
   List<String> localAddresses = [];
   List<DiscoveredServer> discovered = [];
@@ -1120,7 +1147,7 @@ class _NetworkScreenState extends State<NetworkScreen>
         connectedName = '${info['name'] ?? uri.host}';
         serverAdvertisesBle = info['distance_beacon_token'] is String;
         feedback =
-            'Conectado a $connectedName. Ya puedes preparar un ensayo. '
+            'Conectado a $connectedName. Pulsa «Conectar como cliente» para esperar ensayos del servidor. '
             '${serverAdvertisesBle ? 'La baliza Bluetooth se usará solo para estimar distancia.' : 'No se anunció baliza Bluetooth; la distancia puede quedar sin dato.'}';
       });
     } catch (e) {
@@ -1168,6 +1195,7 @@ class _NetworkScreenState extends State<NetworkScreen>
 
   Future<String?> _askName(String title, String label) async {
     var enteredName = '';
+    FocusManager.instance.primaryFocus?.unfocus();
     final value = await showDialog<String>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -1190,6 +1218,9 @@ class _NetworkScreenState extends State<NetworkScreen>
           ),
         ],
       ),
+    );
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => FocusManager.instance.primaryFocus?.unfocus(),
     );
     final trimmed = value?.trim();
     return trimmed == null || trimmed.isEmpty ? null : trimmed;
@@ -1276,6 +1307,12 @@ class _NetworkScreenState extends State<NetworkScreen>
     final actualClients = customAutoClients && widget.network.isServing
         ? widget.network.readyWorkers.clamp(1, 32)
         : k;
+    if (protocol == 'udp-burst' &&
+        (actualClients != 1 || n + warmupCount > 1000 || everyMs > 1000)) {
+      throw const FormatException(
+        'Ráfaga UDP: un cliente, hasta 1000 datagramas incluyendo calentamiento e intervalo máximo de 1000 ms.',
+      );
+    }
     return TrialConfig(
       scenarioId: scenario,
       clients: actualClients,
@@ -1323,17 +1360,11 @@ class _NetworkScreenState extends State<NetworkScreen>
       setState(() => feedback = '$error');
       return;
     }
-    final coordinated =
-        config.clients > 1 || {'E4', 'E5', 'E6'}.contains(config.scenarioId);
-    if (coordinated && !widget.network.isServing) {
+    const coordinated = true;
+    if (!widget.network.isServing) {
       setState(
-        () => feedback = 'Inicia el servidor en el paso 1 para coordinar varios participantes.',
-      );
-      return;
-    }
-    if (!coordinated && !connected) {
-      setState(
-        () => feedback = 'Conecta primero con el servidor en el paso 1.',
+        () => feedback =
+            'Este dispositivo debe iniciar el servidor para ejecutar ensayos.',
       );
       return;
     }
@@ -1367,53 +1398,21 @@ class _NetworkScreenState extends State<NetworkScreen>
       cancel = false;
       coordinating = coordinated;
       progress = 0;
+      expectedSamples = config.count * config.clients;
       feedback = null;
     });
     try {
-      if (coordinated) {
-        final actual = await widget.network.runCoordinatedTrial(
-          session: selectedSession,
-          phase: selectedPhase,
-          config: config,
-        );
-        if (!mounted) return;
-        setState(
-          () => feedback =
-              'Ensayo coordinado: $actual/'
-              '${config.count * config.clients} mediciones recibidas de '
-              '${config.clients} dispositivos.',
-        );
-      } else {
-        final results = await widget.network.runTrial(
-          base: Uri.parse(address.text.trim()),
-          code: code.text.trim(),
-          session: selectedSession,
-          phase: selectedPhase,
-          config: config,
-          cancelled: () => cancel,
-          onProgress: (done, _) {
-            if (mounted) setState(() => progress = done);
-          },
-        );
-        final successes = results.where((item) => item.success).length;
-        if (!mounted) return;
-        final first = results.firstOrNull;
-        final distanceStatus = first?.distanceM == null
-            ? 'Distancia no disponible: '
-                  '${widget.network.lastDistanceReason ?? 'el dispositivo no ofreció una medición fiable'}. '
-                  'Se guardó sin inventar un valor.'
-            : first!.distanceSource.startsWith('ble_rssi_estimate')
-            ? 'Distancia BLE ${first.distanceSource.endsWith('sparse') ? 'estimada con pocas lecturas' : 'estimada'}: ${first.distanceM!.toStringAsFixed(1)} m '
-                  'con margen orientativo ±${first.distanceUncertaintyM?.toStringAsFixed(1) ?? '—'} m. '
-                  'Requiere calibración para uso preciso.'
-            : 'Distancia ${first.distanceM!.toStringAsFixed(1)} m '
-                  '(${first.distanceSource}).';
-        setState(
-          () => feedback =
-              'Ensayo ${cancel ? 'cancelado' : 'terminado'}: '
-              '$successes/${results.length} respuestas. $distanceStatus',
-        );
-      }
+      final actual = await widget.network.runCoordinatedTrial(
+        session: selectedSession,
+        phase: selectedPhase,
+        config: config,
+      );
+      if (!mounted) return;
+      setState(
+        () => feedback =
+            'Ensayo coordinado: $actual/${config.count * config.clients} '
+            'mediciones recibidas de ${config.clients} dispositivos.',
+      );
       widget.onChanged();
     } catch (error) {
       if (mounted) setState(() => feedback = 'Ensayo interrumpido: $error');
@@ -1462,15 +1461,23 @@ class _NetworkScreenState extends State<NetworkScreen>
       preset = kind;
       protocol = kind == 'tcp'
           ? 'tcp'
+          : kind == 'udp-burst'
+          ? 'udp-burst'
           : kind == 'udp'
           ? 'udp'
           : 'http';
       direction = kind == 'upload' ? 'upload' : 'download';
       payload.text = kind == 'latency'
           ? '0'
-          : kind == 'udp'
+          : kind == 'udp' || kind == 'udp-burst'
           ? '32'
           : '65536';
+      if (kind == 'udp-burst') {
+        count.text = '32';
+        clients.text = '1';
+        interval.text = '0';
+        warmup.text = '0';
+      }
     });
   }
 
@@ -1480,6 +1487,7 @@ class _NetworkScreenState extends State<NetworkScreen>
     'upload' => 'Mide el envío de datos hacia el servidor.',
     'tcp' => 'Mide conexión y transferencia TCP directa.',
     'udp' => 'Mide eco UDP con una carga pequeña.',
+    'udp-burst' => 'Envía una ráfaga UDP y mide pérdidas y orden de llegada.',
     _ => 'Configuración personalizada de protocolo y transferencia.',
   };
 
@@ -1487,6 +1495,64 @@ class _NetworkScreenState extends State<NetworkScreen>
   Widget build(BuildContext context) {
     super.build(context);
     final theme = Theme.of(context);
+    if (widget.network.isParticipating) {
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(24, 28, 24, 40),
+        children: [
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 680),
+            child: AcrylicPanel(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    Icons.hub_rounded,
+                    size: 46,
+                    color: theme.colorScheme.primary,
+                  ),
+                  const SizedBox(height: 18),
+                  Text(
+                    'Cliente conectado',
+                    style: theme.textTheme.headlineLarge,
+                  ),
+                  const SizedBox(height: 9),
+                  const Text(
+                    'El servidor inicia los ensayos. Este dispositivo permanece conectado y envía sus mediciones automáticamente, incluso si visitas otra sección de la app.',
+                  ),
+                  const SizedBox(height: 12),
+                  Text('Servidor: ${address.text.trim()}'),
+                  if (widget.network.participantBeaconError != null)
+                    Text(
+                      'Distancia desde servidor no disponible: ${widget.network.participantBeaconError}',
+                    ),
+                  if (widget.network.lastParticipantError != null)
+                    Text(
+                      'Estado de conexión: ${widget.network.lastParticipantError}',
+                      style: TextStyle(color: theme.colorScheme.error),
+                    ),
+                  if (widget.repository.pendingResultCount > 0)
+                    Text(
+                      '${widget.repository.pendingResultCount} lotes pendientes de sincronización.',
+                    ),
+                  if (widget.repository.rejectedResultCount > 0)
+                    Text(
+                      '${widget.repository.rejectedResultCount} lotes no aceptados por un servidor reiniciado. Las mediciones siguen guardadas en este dispositivo.',
+                    ),
+                  const SizedBox(height: 20),
+                  OutlinedButton.icon(
+                    onPressed: busy ? null : _toggleParticipant,
+                    icon: busy
+                        ? const GeometryLoader()
+                        : const Icon(Icons.link_off_rounded),
+                    label: const Text('Desconectar cliente'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      );
+    }
     final sessions = widget.repository.sessions();
     if (!sessions.any((s) => s.id == sessionId)) {
       sessionId = sessions.firstOrNull?.id;
@@ -1534,20 +1600,22 @@ class _NetworkScreenState extends State<NetworkScreen>
               Text('Red y ensayos', style: theme.textTheme.headlineLarge),
               const SizedBox(height: 7),
               const Text(
-                'Tres pasos para medir dispositivos en la misma red local.',
+                'El servidor coordina ensayos; los clientes esperan instrucciones.',
               ),
               const SizedBox(height: 19),
               Wrap(
                 spacing: 10,
                 children: [
                   ChoiceChip(
-                    label: const Text('Medir desde este dispositivo'),
+                    label: const Text('Conectar como cliente'),
                     avatar: const Icon(Icons.speed_rounded, size: 18),
                     selected: !serverMode,
-                    onSelected: (_) => setState(() => serverMode = false),
+                    onSelected: widget.network.isServing
+                        ? null
+                        : (_) => setState(() => serverMode = false),
                   ),
                   ChoiceChip(
-                    label: const Text('Ofrecer servidor'),
+                    label: const Text('Iniciar servidor y medir'),
                     avatar: const Icon(Icons.dns_outlined, size: 18),
                     selected: serverMode,
                     onSelected: (_) {
@@ -1656,9 +1724,49 @@ class _NetworkScreenState extends State<NetworkScreen>
                         ),
                       ),
                       const SizedBox(height: 12),
+                      if (hotspot?.active == true &&
+                          hotspot?.ssid?.isNotEmpty == true &&
+                          (hotspot?.security == 'nopass' ||
+                              hotspot?.passphrase?.isNotEmpty == true)) ...[
+                        const SizedBox(height: 14),
+                        AcrylicPanel(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Conectar al Wi-Fi local',
+                                style: theme.textTheme.titleMedium,
+                              ),
+                              const SizedBox(height: 8),
+                              const Text(
+                                'Escanea el QR para unirte al hotspot. Después abre LANXIS y usa el código del servidor.',
+                              ),
+                              const SizedBox(height: 12),
+                              Container(
+                                padding: const EdgeInsets.all(12),
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  borderRadius: BorderRadius.circular(16),
+                                ),
+                                child: QrImageView(
+                                  data: wifiQrPayload(
+                                    ssid: hotspot!.ssid!,
+                                    passphrase: hotspot!.passphrase,
+                                    security: hotspot!.security,
+                                  ),
+                                  size: 192,
+                                  backgroundColor: Colors.white,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
                       ExpansionTile(
                         tilePadding: EdgeInsets.zero,
                         title: const Text('Opciones de red Wi-Fi'),
+                        onExpansionChanged: (_) =>
+                            FocusManager.instance.primaryFocus?.unfocus(),
                         children: [
                           Align(
                             alignment: Alignment.centerLeft,
@@ -1750,6 +1858,8 @@ class _NetworkScreenState extends State<NetworkScreen>
                       TextField(
                         controller: address,
                         keyboardType: TextInputType.url,
+                        onTapOutside: (_) =>
+                            FocusManager.instance.primaryFocus?.unfocus(),
                         decoration: const InputDecoration(
                           labelText: 'Dirección del servidor',
                           hintText: 'http://192.168.1.65:8040',
@@ -1761,6 +1871,8 @@ class _NetworkScreenState extends State<NetworkScreen>
                       TextField(
                         controller: code,
                         keyboardType: TextInputType.number,
+                        onTapOutside: (_) =>
+                            FocusManager.instance.primaryFocus?.unfocus(),
                         maxLength: 6,
                         decoration: const InputDecoration(
                           labelText: 'Código de seis dígitos',
@@ -1797,13 +1909,13 @@ class _NetworkScreenState extends State<NetworkScreen>
                       const SizedBox(height: 10),
                       ExpansionTile(
                         tilePadding: EdgeInsets.zero,
-                        title: const Text(
-                          'Participar en ensayo de otro dispositivo',
-                        ),
+                        title: const Text('Esperar ensayos del servidor'),
+                        onExpansionChanged: (_) =>
+                            FocusManager.instance.primaryFocus?.unfocus(),
                         subtitle: Text(
                           widget.network.isParticipating
                               ? 'Participante listo · esperando instrucciones'
-                              : 'Úsalo si este teléfono será un cliente auxiliar en E4–E6.',
+                              : 'El servidor ejecuta los ensayos; este dispositivo solo responde y envía mediciones.',
                         ),
                         children: [
                           Align(
@@ -1827,8 +1939,8 @@ class _NetworkScreenState extends State<NetworkScreen>
                                         ),
                                   label: Text(
                                     widget.network.isParticipating
-                                        ? 'Dejar de participar'
-                                        : 'Participar ahora',
+                                        ? 'Desconectar cliente'
+                                        : 'Conectar como cliente',
                                   ),
                                 ),
                                 if (widget.network.lastParticipantError != null)
@@ -1846,6 +1958,10 @@ class _NetworkScreenState extends State<NetworkScreen>
                                   Text(
                                     '${widget.repository.pendingResultCount} resultados pendientes de sincronización.',
                                   ),
+                                if (widget.repository.rejectedResultCount > 0)
+                                  Text(
+                                    '${widget.repository.rejectedResultCount} lotes no aceptados; copia local conservada.',
+                                  ),
                               ],
                             ),
                           ),
@@ -1856,506 +1972,537 @@ class _NetworkScreenState extends State<NetworkScreen>
                   ],
                 ),
               ),
-              const SizedBox(height: 15),
-              AcrylicPanel(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    heading(
-                      '02',
-                      'Guardar en una sesión',
-                      'La sesión agrupa el experimento; la fase agrupa las mediciones de una etapa.',
-                    ),
-                    Wrap(
-                      spacing: 9,
-                      runSpacing: 9,
-                      children: [
-                        OutlinedButton.icon(
-                          onPressed: busy ? null : _createSession,
-                          icon: const Icon(Icons.add_rounded),
-                          label: const Text('Nueva sesión'),
-                        ),
-                        if (sessionId != null)
-                          TextButton.icon(
-                            onPressed: busy ? null : _createPhase,
+              if (serverMode || widget.network.isServing) ...[
+                const SizedBox(height: 15),
+                AcrylicPanel(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      heading(
+                        '02',
+                        'Guardar en una sesión',
+                        'La sesión agrupa el experimento; la fase agrupa las mediciones de una etapa.',
+                      ),
+                      Wrap(
+                        spacing: 9,
+                        runSpacing: 9,
+                        children: [
+                          OutlinedButton.icon(
+                            onPressed: busy ? null : _createSession,
                             icon: const Icon(Icons.add_rounded),
-                            label: const Text('Añadir fase'),
+                            label: const Text('Nueva sesión'),
                           ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    Wrap(
-                      spacing: 10,
-                      runSpacing: 10,
-                      children: [
-                        SizedBox(
-                          width: 260,
-                          child: DropdownButtonFormField<String>(
-                            key: ValueKey('session-$sessionId'),
-                            initialValue: sessionId,
-                            decoration: const InputDecoration(
-                              labelText: 'Sesión',
-                            ),
-                            items: [
-                              for (final s in sessions)
-                                DropdownMenuItem(
-                                  value: s.id,
-                                  child: Text(s.name),
-                                ),
-                            ],
-                            onChanged: busy
-                                ? null
-                                : (value) => setState(() {
-                                    sessionId = value;
-                                    phaseId = null;
-                                  }),
-                          ),
-                        ),
-                        SizedBox(
-                          width: 230,
-                          child: DropdownButtonFormField<String>(
-                            key: ValueKey('phase-$sessionId-$phaseId'),
-                            initialValue: phaseId,
-                            decoration: const InputDecoration(
-                              labelText: 'Fase',
-                            ),
-                            items: [
-                              for (final p in phases)
-                                DropdownMenuItem(
-                                  value: p.id,
-                                  child: Text(p.name),
-                                ),
-                            ],
-                            onChanged: busy
-                                ? null
-                                : (value) => setState(() => phaseId = value),
-                          ),
-                        ),
-                      ],
-                    ),
-                    if (sessions.isEmpty)
-                      const Padding(
-                        padding: EdgeInsets.only(top: 10),
-                        child: Text(
-                          'Crea una sesión para guardar el primer ensayo.',
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 15),
-              AcrylicPanel(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    heading(
-                      '03',
-                      'Configurar y medir',
-                      'Elige un escenario, revisa el plan y comienza la medición.',
-                    ),
-                    SizedBox(
-                      width: 290,
-                      child: DropdownButtonFormField<String>(
-                        key: ValueKey('scenario-$scenario'),
-                        isExpanded: true,
-                        initialValue: scenario,
-                        decoration: const InputDecoration(
-                          labelText: 'Escenario de prueba',
-                        ),
-                        items: [
-                          for (final id in [
-                            ...List.generate(6, (index) => 'E${index + 1}'),
-                            'Libre',
-                          ])
-                            DropdownMenuItem(
-                              value: id,
-                              child: Text(
-                                id == 'Libre' ? 'Libre · configurar' : id,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          for (final item
-                              in widget.repository.scenarioTemplates())
-                            DropdownMenuItem(
-                              value: item.id,
-                              child: Text(
-                                item.name,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                        ],
-                        onChanged: busy
-                            ? null
-                            : (value) {
-                                if (value != null) _setScenario(value);
-                              },
-                      ),
-                    ),
-                    const SizedBox(height: 14),
-                    const Text('Tipo de ambiente'),
-                    const SizedBox(height: 6),
-                    Wrap(
-                      spacing: 8,
-                      children: [
-                        ChoiceChip(
-                          label: const Text('Cerrado'),
-                          selected: environment == 'indoor',
-                          onSelected: busy
-                              ? null
-                              : (_) => setState(() => environment = 'indoor'),
-                        ),
-                        ChoiceChip(
-                          label: const Text('Abierto'),
-                          selected: environment == 'outdoor',
-                          onSelected: busy
-                              ? null
-                              : (_) => setState(() => environment = 'outdoor'),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    if (isReferenceScenario) ...[
-                      const Text('Perfil de carga'),
-                      const SizedBox(height: 6),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          for (final (label, value) in [
-                            ('Latencia', 'latency'),
-                            ('Equilibrada', 'balanced'),
-                            ('Transferencia', 'throughput'),
-                          ])
-                            ChoiceChip(
-                              label: Text(label),
-                              selected: loadProfile == value,
-                              onSelected: busy
-                                  ? null
-                                  : (_) => setState(() => loadProfile = value),
+                          if (sessionId != null)
+                            TextButton.icon(
+                              onPressed: busy ? null : _createPhase,
+                              icon: const Icon(Icons.add_rounded),
+                              label: const Text('Añadir fase'),
                             ),
                         ],
                       ),
-                      const SizedBox(height: 14),
-                      _NumberField(
-                        controller: count,
-                        label: 'Muestras por cliente',
-                        width: 220,
-                      ),
-                      const SizedBox(height: 16),
-                      ValueListenableBuilder(
-                        valueListenable: count,
-                        builder: (context, value, child) {
-                          final plan = ScenarioPlanner.reference(
-                            scenarioId: scenario,
-                            environment: environment,
-                            load: loadProfile,
-                            readyClients: widget.network.readyWorkers,
-                            count: int.tryParse(count.text) ?? 100,
-                          );
-                          final config = plan.config;
-                          return Container(
-                            width: double.infinity,
-                            padding: const EdgeInsets.all(16),
-                            decoration: BoxDecoration(
-                              color: theme.colorScheme.primary.withValues(
-                                alpha: .07,
-                              ),
-                              borderRadius: BorderRadius.circular(17),
-                              border: Border.all(
-                                color: theme.colorScheme.primary.withValues(
-                                  alpha: .26,
-                                ),
-                              ),
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  'Vista previa · $scenario',
-                                  style: theme.textTheme.titleLarge,
-                                ),
-                                const SizedBox(height: 6),
-                                Text(plan.description),
-                                const SizedBox(height: 10),
-                                Text(
-                                  '${config.clients} cliente(s) × '
-                                  '${config.count} muestras = ${plan.totalSamples} observaciones',
-                                ),
-                                Text(
-                                  'HTTP · ${config.payloadBytes} bytes por petición · '
-                                  '${config.intervalMs} ms entre peticiones por cliente',
-                                ),
-                                Text(
-                                  'Espera ${config.timeoutMs} ms · '
-                                  '${config.warmup} muestras de calentamiento',
-                                ),
-                                if (config.clients > 1) ...[
-                                  const SizedBox(height: 8),
-                                  Text(
-                                    'Participantes listos: '
-                                    '${widget.network.readyWorkers}/${config.clients}',
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.w700,
-                                      color: plan.enoughParticipants
-                                          ? theme.colorScheme.primary
-                                          : theme.colorScheme.error,
-                                    ),
-                                  ),
-                                ],
-                                const SizedBox(height: 8),
-                                const Text(
-                                  'La distancia objetivo define la condición E1–E6. '
-                                  'LANXIS intenta estimar la distancia al servidor '
-                                  'mediante su baliza Bluetooth o medirla por Wi-Fi RTT '
-                                  'cuando el servidor es un punto de acceso compatible.',
-                                ),
-                              ],
-                            ),
-                          );
-                        },
-                      ),
-                    ] else ...[
-                      const SizedBox(height: 4),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          for (final (label, kind) in [
-                            ('Latencia', 'latency'),
-                            ('Descarga', 'download'),
-                            ('Subida', 'upload'),
-                            ('TCP', 'tcp'),
-                            ('UDP eco', 'udp'),
-                          ])
-                            ChoiceChip(
-                              label: Text(label),
-                              selected: preset == kind,
-                              onSelected: busy
-                                  ? null
-                                  : (_) => _applyPreset(kind),
-                            ),
-                        ],
-                      ),
-                      const SizedBox(height: 10),
-                      Text(_presetDescription()),
                       const SizedBox(height: 12),
                       Wrap(
                         spacing: 10,
                         runSpacing: 10,
                         children: [
-                          _NumberField(
-                            controller: count,
-                            label: 'Muestras por cliente',
-                            width: 215,
+                          SizedBox(
+                            width: 260,
+                            child: DropdownButtonFormField<String>(
+                              key: ValueKey('session-$sessionId'),
+                              initialValue: sessionId,
+                              decoration: const InputDecoration(
+                                labelText: 'Sesión',
+                              ),
+                              items: [
+                                for (final s in sessions)
+                                  DropdownMenuItem(
+                                    value: s.id,
+                                    child: Text(s.name),
+                                  ),
+                              ],
+                              onChanged: busy
+                                  ? null
+                                  : (value) => setState(() {
+                                      sessionId = value;
+                                      phaseId = null;
+                                    }),
+                            ),
                           ),
-                          _NumberField(
-                            controller: payload,
-                            label: 'Carga · bytes',
-                            width: 170,
+                          SizedBox(
+                            width: 230,
+                            child: DropdownButtonFormField<String>(
+                              key: ValueKey('phase-$sessionId-$phaseId'),
+                              initialValue: phaseId,
+                              decoration: const InputDecoration(
+                                labelText: 'Fase',
+                              ),
+                              items: [
+                                for (final p in phases)
+                                  DropdownMenuItem(
+                                    value: p.id,
+                                    child: Text(p.name),
+                                  ),
+                              ],
+                              onChanged: busy
+                                  ? null
+                                  : (value) => setState(() => phaseId = value),
+                            ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 8),
-                      SwitchListTile(
-                        contentPadding: EdgeInsets.zero,
-                        title: const Text('Adaptar a participantes listos'),
-                        subtitle: const Text(
-                          'Al iniciar en el servidor, usa los clientes activos.',
+                      if (sessions.isEmpty)
+                        const Padding(
+                          padding: EdgeInsets.only(top: 10),
+                          child: Text(
+                            'Crea una sesión para guardar el primer ensayo.',
+                          ),
                         ),
-                        value: customAutoClients,
-                        onChanged: busy
-                            ? null
-                            : (value) =>
-                                  setState(() => customAutoClients = value),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 15),
+                AcrylicPanel(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      heading(
+                        '03',
+                        'Configurar y medir',
+                        'Elige un escenario, revisa el plan y comienza la medición.',
                       ),
+                      SizedBox(
+                        width: 290,
+                        child: DropdownButtonFormField<String>(
+                          key: ValueKey('scenario-$scenario'),
+                          isExpanded: true,
+                          initialValue: scenario,
+                          decoration: const InputDecoration(
+                            labelText: 'Escenario de prueba',
+                          ),
+                          items: [
+                            for (final id in [
+                              ...List.generate(6, (index) => 'E${index + 1}'),
+                              'Libre',
+                            ])
+                              DropdownMenuItem(
+                                value: id,
+                                child: Text(
+                                  id == 'Libre' ? 'Libre · configurar' : id,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            for (final item
+                                in widget.repository.scenarioTemplates())
+                              DropdownMenuItem(
+                                value: item.id,
+                                child: Text(
+                                  item.name,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                          ],
+                          onChanged: busy
+                              ? null
+                              : (value) {
+                                  if (value != null) _setScenario(value);
+                                },
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      const Text('Tipo de ambiente'),
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 8,
+                        children: [
+                          ChoiceChip(
+                            label: const Text('Cerrado'),
+                            selected: environment == 'indoor',
+                            onSelected: busy
+                                ? null
+                                : (_) => setState(() => environment = 'indoor'),
+                          ),
+                          ChoiceChip(
+                            label: const Text('Abierto'),
+                            selected: environment == 'outdoor',
+                            onSelected: busy
+                                ? null
+                                : (_) =>
+                                      setState(() => environment = 'outdoor'),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      if (isReferenceScenario) ...[
+                        const Text('Perfil de carga'),
+                        const SizedBox(height: 6),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            for (final (label, value) in [
+                              ('Latencia', 'latency'),
+                              ('Equilibrada', 'balanced'),
+                              ('Transferencia', 'throughput'),
+                            ])
+                              ChoiceChip(
+                                label: Text(label),
+                                selected: loadProfile == value,
+                                onSelected: busy
+                                    ? null
+                                    : (_) =>
+                                          setState(() => loadProfile = value),
+                              ),
+                          ],
+                        ),
+                        const SizedBox(height: 14),
+                        _NumberField(
+                          controller: count,
+                          label: 'Muestras por cliente',
+                          width: 220,
+                        ),
+                        const SizedBox(height: 16),
+                        ValueListenableBuilder(
+                          valueListenable: count,
+                          builder: (context, value, child) {
+                            final plan = ScenarioPlanner.reference(
+                              scenarioId: scenario,
+                              environment: environment,
+                              load: loadProfile,
+                              readyClients: widget.network.readyWorkers,
+                              count: int.tryParse(count.text) ?? 100,
+                            );
+                            final config = plan.config;
+                            return Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.all(16),
+                              decoration: BoxDecoration(
+                                color: theme.colorScheme.primary.withValues(
+                                  alpha: .07,
+                                ),
+                                borderRadius: BorderRadius.circular(17),
+                                border: Border.all(
+                                  color: theme.colorScheme.primary.withValues(
+                                    alpha: .26,
+                                  ),
+                                ),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'Vista previa · $scenario',
+                                    style: theme.textTheme.titleLarge,
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Text(plan.description),
+                                  const SizedBox(height: 10),
+                                  Text(
+                                    '${config.clients} cliente(s) × '
+                                    '${config.count} muestras = ${plan.totalSamples} observaciones',
+                                  ),
+                                  Text(
+                                    'HTTP · ${config.payloadBytes} bytes por petición · '
+                                    '${config.intervalMs} ms entre peticiones por cliente',
+                                  ),
+                                  Text(
+                                    'Espera ${config.timeoutMs} ms · '
+                                    '${config.warmup} muestras de calentamiento',
+                                  ),
+                                  if (config.clients > 1) ...[
+                                    const SizedBox(height: 8),
+                                    Text(
+                                      'Participantes listos: '
+                                      '${widget.network.readyWorkers}/${config.clients}',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.w700,
+                                        color: plan.enoughParticipants
+                                            ? theme.colorScheme.primary
+                                            : theme.colorScheme.error,
+                                      ),
+                                    ),
+                                  ],
+                                  const SizedBox(height: 8),
+                                  const Text(
+                                    'La distancia objetivo define la condición E1–E6. '
+                                    'LANXIS intenta estimar la distancia al servidor '
+                                    'mediante su baliza Bluetooth o medirla por Wi-Fi RTT '
+                                    'cuando el servidor es un punto de acceso compatible.',
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                      ] else ...[
+                        const SizedBox(height: 4),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            for (final (label, kind) in [
+                              ('Latencia', 'latency'),
+                              ('Descarga', 'download'),
+                              ('Subida', 'upload'),
+                              ('TCP', 'tcp'),
+                              ('UDP eco', 'udp'),
+                              ('UDP ráfaga', 'udp-burst'),
+                            ])
+                              ChoiceChip(
+                                label: Text(label),
+                                selected: preset == kind,
+                                onSelected: busy
+                                    ? null
+                                    : (_) => _applyPreset(kind),
+                              ),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                        Text(_presetDescription()),
+                        const SizedBox(height: 12),
+                        Wrap(
+                          spacing: 10,
+                          runSpacing: 10,
+                          children: [
+                            _NumberField(
+                              controller: count,
+                              label: 'Muestras por cliente',
+                              width: 215,
+                            ),
+                            _NumberField(
+                              controller: payload,
+                              label: 'Carga · bytes',
+                              width: 170,
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('Adaptar a participantes listos'),
+                          subtitle: const Text(
+                            'Al iniciar en el servidor, usa los clientes activos.',
+                          ),
+                          value: customAutoClients,
+                          onChanged: busy
+                              ? null
+                              : (value) =>
+                                    setState(() => customAutoClients = value),
+                        ),
+                        ExpansionTile(
+                          tilePadding: EdgeInsets.zero,
+                          title: const Text('Parámetros personalizados'),
+                          onExpansionChanged: (_) =>
+                              FocusManager.instance.primaryFocus?.unfocus(),
+                          children: [
+                            Align(
+                              alignment: Alignment.centerLeft,
+                              child: Wrap(
+                                spacing: 10,
+                                runSpacing: 10,
+                                children: [
+                                  SizedBox(
+                                    width: 150,
+                                    child: DropdownButtonFormField<String>(
+                                      key: ValueKey('protocol-$protocol'),
+                                      initialValue: protocol,
+                                      decoration: const InputDecoration(
+                                        labelText: 'Protocolo',
+                                      ),
+                                      items: const [
+                                        DropdownMenuItem(
+                                          value: 'http',
+                                          child: Text('HTTP'),
+                                        ),
+                                        DropdownMenuItem(
+                                          value: 'tcp',
+                                          child: Text('TCP'),
+                                        ),
+                                        DropdownMenuItem(
+                                          value: 'udp',
+                                          child: Text('UDP eco'),
+                                        ),
+                                        DropdownMenuItem(
+                                          value: 'udp-burst',
+                                          child: Text('UDP ráfaga'),
+                                        ),
+                                      ],
+                                      onChanged: busy
+                                          ? null
+                                          : (value) {
+                                              if (value != null) {
+                                                setState(() {
+                                                  protocol = value;
+                                                  if (value == 'udp' ||
+                                                      value == 'udp-burst') {
+                                                    direction = 'download';
+                                                  }
+                                                  preset = 'custom';
+                                                });
+                                              }
+                                            },
+                                    ),
+                                  ),
+                                  SizedBox(
+                                    width: 155,
+                                    child: DropdownButtonFormField<String>(
+                                      key: ValueKey(
+                                        'direction-$protocol-$direction',
+                                      ),
+                                      initialValue: direction,
+                                      decoration: const InputDecoration(
+                                        labelText: 'Transferencia',
+                                      ),
+                                      items: const [
+                                        DropdownMenuItem(
+                                          value: 'download',
+                                          child: Text('Descarga'),
+                                        ),
+                                        DropdownMenuItem(
+                                          value: 'upload',
+                                          child: Text('Subida'),
+                                        ),
+                                      ],
+                                      onChanged:
+                                          busy ||
+                                              protocol == 'udp' ||
+                                              protocol == 'udp-burst'
+                                          ? null
+                                          : (value) {
+                                              if (value != null) {
+                                                setState(() {
+                                                  direction = value;
+                                                  preset = 'custom';
+                                                });
+                                              }
+                                            },
+                                    ),
+                                  ),
+                                  if (!customAutoClients)
+                                    _NumberField(
+                                      controller: clients,
+                                      label: 'Clientes',
+                                      width: 125,
+                                    ),
+                                  _NumberField(
+                                    controller: interval,
+                                    label: 'Intervalo · ms',
+                                    width: 155,
+                                  ),
+                                  _NumberField(
+                                    controller: timeout,
+                                    label: 'Espera máxima · ms',
+                                    width: 190,
+                                  ),
+                                  _NumberField(
+                                    controller: warmup,
+                                    label: 'Calentamiento',
+                                    width: 155,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        TextButton.icon(
+                          onPressed: busy ? null : _saveTemplate,
+                          icon: const Icon(Icons.bookmark_add_outlined),
+                          label: Text(
+                            scenario == 'Libre'
+                                ? 'Guardar escenario'
+                                : 'Guardar copia personalizada',
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: 12),
                       ExpansionTile(
                         tilePadding: EdgeInsets.zero,
-                        title: const Text('Parámetros personalizados'),
+                        title: const Text('Distancia real'),
+                        onExpansionChanged: (_) =>
+                            FocusManager.instance.primaryFocus?.unfocus(),
+                        subtitle: const Text(
+                          'Automática si es medible; no se exige para iniciar.',
+                        ),
                         children: [
                           Align(
                             alignment: Alignment.centerLeft,
-                            child: Wrap(
-                              spacing: 10,
-                              runSpacing: 10,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                SizedBox(
-                                  width: 150,
-                                  child: DropdownButtonFormField<String>(
-                                    key: ValueKey('protocol-$protocol'),
-                                    initialValue: protocol,
-                                    decoration: const InputDecoration(
-                                      labelText: 'Protocolo',
-                                    ),
-                                    items: const [
-                                      DropdownMenuItem(
-                                        value: 'http',
-                                        child: Text('HTTP'),
-                                      ),
-                                      DropdownMenuItem(
-                                        value: 'tcp',
-                                        child: Text('TCP'),
-                                      ),
-                                      DropdownMenuItem(
-                                        value: 'udp',
-                                        child: Text('UDP eco'),
-                                      ),
-                                    ],
-                                    onChanged: busy
-                                        ? null
-                                        : (value) {
-                                            if (value != null) {
-                                              setState(() {
-                                                protocol = value;
-                                                if (value == 'udp') {
-                                                  direction = 'download';
-                                                }
-                                                preset = 'custom';
-                                              });
-                                            }
-                                          },
-                                  ),
+                                const Text(
+                                  'El servidor busca la baliza Bluetooth de cada cliente y estima '
+                                  'su distancia con incertidumbre. Si no puede medir, conserva '
+                                  'la distancia que informe el cliente. Bluetooth solo aporta '
+                                  'distancia; el ensayo sigue usando HTTP, TCP o UDP. '
+                                  'Puedes registrar una medición externa si la tienes.',
                                 ),
-                                SizedBox(
-                                  width: 155,
-                                  child: DropdownButtonFormField<String>(
-                                    key: ValueKey(
-                                      'direction-$protocol-$direction',
-                                    ),
-                                    initialValue: direction,
-                                    decoration: const InputDecoration(
-                                      labelText: 'Transferencia',
-                                    ),
-                                    items: const [
-                                      DropdownMenuItem(
-                                        value: 'download',
-                                        child: Text('Descarga'),
-                                      ),
-                                      DropdownMenuItem(
-                                        value: 'upload',
-                                        child: Text('Subida'),
-                                      ),
-                                    ],
-                                    onChanged: busy || protocol == 'udp'
-                                        ? null
-                                        : (value) {
-                                            if (value != null) {
-                                              setState(() {
-                                                direction = value;
-                                                preset = 'custom';
-                                              });
-                                            }
-                                          },
-                                  ),
-                                ),
-                                if (!customAutoClients)
-                                  _NumberField(
-                                    controller: clients,
-                                    label: 'Clientes',
-                                    width: 125,
-                                  ),
+                                const SizedBox(height: 10),
                                 _NumberField(
-                                  controller: interval,
-                                  label: 'Intervalo · ms',
-                                  width: 155,
-                                ),
-                                _NumberField(
-                                  controller: timeout,
-                                  label: 'Espera máxima · ms',
-                                  width: 190,
-                                ),
-                                _NumberField(
-                                  controller: warmup,
-                                  label: 'Calentamiento',
-                                  width: 155,
+                                  controller: distance,
+                                  label: 'Introducir distancia medida · m (opcional)',
+                                  width: 300,
                                 ),
                               ],
                             ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 8),
-                      TextButton.icon(
-                        onPressed: busy ? null : _saveTemplate,
-                        icon: const Icon(Icons.bookmark_add_outlined),
-                        label: Text(
-                          scenario == 'Libre'
-                              ? 'Guardar escenario'
-                              : 'Guardar copia personalizada',
+                      const SizedBox(height: 18),
+                      if (busy && coordinating) ...[
+                        LinearProgressIndicator(
+                          value:
+                              (widget.network.coordinatedSamples /
+                                      math.max(1, expectedSamples))
+                                  .clamp(0, 1),
                         ),
-                      ),
-                    ],
-                    const SizedBox(height: 12),
-                    ExpansionTile(
-                      tilePadding: EdgeInsets.zero,
-                      title: const Text('Distancia real'),
-                      subtitle: const Text(
-                        'Automática si es medible; no se exige para iniciar.',
-                      ),
-                      children: [
-                        Align(
-                          alignment: Alignment.centerLeft,
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text(
-                                'LANXIS busca automáticamente una baliza Bluetooth del servidor '
-                                'y estima metros con un margen orientativo. Bluetooth solo aporta '
-                                'distancia; el ensayo sigue usando HTTP, TCP o UDP. '
-                                'Si no hay baliza, intenta Wi-Fi RTT con un punto de acceso '
-                                'compatible. Puedes registrar una medición externa si la tienes.',
-                              ),
-                              const SizedBox(height: 10),
-                              _NumberField(
-                                controller: distance,
-                                label: 'Introducir distancia medida · m (opcional)',
-                                width: 300,
-                              ),
-                            ],
-                          ),
+                        const SizedBox(height: 8),
+                        Text(
+                          '${widget.network.coordinatedSamples} muestras recibidas · ${widget.network.completedWorkers} clientes terminados',
                         ),
+                        const SizedBox(height: 9),
+                      ] else if (busy && progress > 0) ...[
+                        LinearProgressIndicator(
+                          value: (progress / (int.tryParse(count.text) ?? 1))
+                              .clamp(0, 1),
+                        ),
+                        const SizedBox(height: 9),
                       ],
-                    ),
-                    const SizedBox(height: 18),
-                    if (busy && progress > 0) ...[
-                      LinearProgressIndicator(
-                        value: (progress / (int.tryParse(count.text) ?? 1))
-                            .clamp(0, 1),
+                      Wrap(
+                        spacing: 10,
+                        runSpacing: 8,
+                        children: [
+                          FilledButton.icon(
+                            onPressed: busy || !widget.network.isServing
+                                ? null
+                                : _run,
+                            icon: busy
+                                ? const GeometryLoader()
+                                : const Icon(Icons.play_arrow_rounded),
+                            label: Text(
+                              busy
+                                  ? progress > 0
+                                        ? 'Midiendo $progress…'
+                                        : 'Preparando ensayo…'
+                                  : 'Iniciar ensayo desde servidor',
+                            ),
+                          ),
+                          if (busy && !coordinating)
+                            TextButton(
+                              onPressed: () => setState(() => cancel = true),
+                              child: const Text('Cancelar'),
+                            ),
+                        ],
                       ),
-                      const SizedBox(height: 9),
+                      const SizedBox(height: 6),
+                      const Text(
+                        'Cada ejecución crea una prueba con sus muestras. '
+                        'Los resultados aparecen en Análisis.',
+                      ),
+                      message(),
                     ],
-                    Wrap(
-                      spacing: 10,
-                      runSpacing: 8,
-                      children: [
-                        FilledButton.icon(
-                          onPressed: busy ? null : _run,
-                          icon: busy
-                              ? const GeometryLoader()
-                              : const Icon(Icons.play_arrow_rounded),
-                          label: Text(
-                            busy
-                                ? progress > 0
-                                      ? 'Midiendo $progress…'
-                                      : 'Preparando ensayo…'
-                                : 'Iniciar ensayo',
-                          ),
-                        ),
-                        if (busy && !coordinating)
-                          TextButton(
-                            onPressed: () => setState(() => cancel = true),
-                            child: const Text('Cancelar'),
-                          ),
-                      ],
-                    ),
-                    const SizedBox(height: 6),
-                    const Text(
-                      'Cada ejecución crea una prueba con sus muestras. '
-                      'Los resultados aparecen en Análisis.',
-                    ),
-                    message(),
-                  ],
+                  ),
                 ),
-              ),
+              ],
             ],
           ),
         ),
@@ -2380,6 +2527,7 @@ class _NumberField extends StatelessWidget {
       controller: controller,
       keyboardType: const TextInputType.numberWithOptions(decimal: true),
       decoration: InputDecoration(labelText: label),
+      onTapOutside: (_) => FocusManager.instance.primaryFocus?.unfocus(),
     ),
   );
 }
@@ -2401,6 +2549,7 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
   String selectedPhase = 'all';
   String selectedTest = 'all';
   String selectedTrial = 'all';
+  String selectedClient = 'all';
   bool exporting = false;
 
   Future<void> _exportSelection(String format) async {
@@ -2410,16 +2559,24 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
       final path = await ExportService(widget.repository).save(
         selected!,
         format: format,
+        analysis: format == 'csv',
         scope: ExportScope(
           phaseId: selectedPhase == 'all' ? null : selectedPhase,
           testId: selectedTest == 'all' ? null : selectedTest,
           trialId: selectedTrial == 'all' ? null : selectedTrial,
+          clientId: selectedClient == 'all' ? null : selectedClient,
         ),
       );
       if (mounted && path != null) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Selección exportada a $path')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              Platform.isAndroid
+                  ? 'Análisis guardado en Archivos.'
+                  : 'Selección exportada a $path',
+            ),
+          ),
+        );
       }
     } catch (error) {
       if (mounted) {
@@ -2473,7 +2630,7 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
     final allItems = selected == null
         ? <Measurement>[]
         : widget.repository.measurements(selected!);
-    final items = allItems
+    final baseItems = allItems
         .where(
           (m) =>
               (selectedPhase == 'all' || m.phaseId == selectedPhase) &&
@@ -2481,6 +2638,42 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
               (selectedTrial == 'all' || m.trialId == selectedTrial),
         )
         .toList();
+    final report = AnalysisReport(baseItems);
+    if (selectedClient != 'all' &&
+        !report.individual.containsKey(selectedClient)) {
+      selectedClient = 'all';
+    }
+    final items = selectedClient == 'all'
+        ? baseItems
+        : baseItems
+              .where(
+                (m) => (m.clientId ?? 'Sin identificador') == selectedClient,
+              )
+              .toList();
+    final selectedSummary = selectedClient == 'all'
+        ? report.general
+        : report.individual[selectedClient]!;
+    final serverEvents = selected == null
+        ? <Map<String, Object?>>[]
+        : widget.repository
+              .eventsForSession(selected!)
+              .where(
+                (e) =>
+                    (e['type'] as String? ?? '').startsWith(
+                      'coordinated_trial_',
+                    ) &&
+                    e['type'] != 'coordinated_trial_started' &&
+                    (selectedPhase == 'all' ||
+                        e['phase_id'] == selectedPhase) &&
+                    (selectedTest == 'all' || e['test_id'] == selectedTest) &&
+                    (selectedTrial == 'all' || e['trial_id'] == selectedTrial),
+              )
+              .toList();
+    final serverMetric = serverEvents.isEmpty
+        ? null
+        : Map<String, Object?>.from(
+            jsonDecode(serverEvents.last['metadata_json'] as String) as Map,
+          );
     final valid = items
         .where((m) => m.success && m.latencyMs != null)
         .map((m) => m.latencyMs!)
@@ -2524,11 +2717,18 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                     width: 300,
                     child: DropdownButtonFormField<String>(
                       key: ValueKey('analysis-session-$selected'),
+                      isExpanded: true,
                       initialValue: selected,
                       decoration: const InputDecoration(labelText: 'Sesión'),
                       items: [
                         for (final s in sessions)
-                          DropdownMenuItem(value: s.id, child: Text(s.name)),
+                          DropdownMenuItem(
+                            value: s.id,
+                            child: Text(
+                              s.name,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
                       ],
                       onChanged: (v) => setState(() {
                         selected = v;
@@ -2542,6 +2742,7 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                     width: 220,
                     child: DropdownButtonFormField<String>(
                       key: ValueKey('analysis-phase-$selected-$selectedPhase'),
+                      isExpanded: true,
                       initialValue: selectedPhase,
                       decoration: const InputDecoration(labelText: 'Fase'),
                       items: [
@@ -2552,7 +2753,10 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                         for (final phase in phases)
                           DropdownMenuItem(
                             value: phase.id,
-                            child: Text(phase.name),
+                            child: Text(
+                              phase.name,
+                              overflow: TextOverflow.ellipsis,
+                            ),
                           ),
                       ],
                       onChanged: (v) => setState(() {
@@ -2568,6 +2772,7 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                       key: ValueKey(
                         'analysis-test-$selectedPhase-$selectedTest',
                       ),
+                      isExpanded: true,
                       initialValue: selectedTest,
                       decoration: const InputDecoration(labelText: 'Prueba'),
                       items: [
@@ -2578,7 +2783,10 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                         for (final test in tests)
                           DropdownMenuItem(
                             value: test['id'] as String,
-                            child: Text(test['name'] as String),
+                            child: Text(
+                              test['name'] as String,
+                              overflow: TextOverflow.ellipsis,
+                            ),
                           ),
                       ],
                       onChanged: (v) => setState(() {
@@ -2593,6 +2801,7 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                       key: ValueKey(
                         'analysis-trial-$selectedTest-$selectedTrial',
                       ),
+                      isExpanded: true,
                       initialValue: selectedTrial,
                       decoration: const InputDecoration(labelText: 'Ensayo'),
                       items: [
@@ -2605,6 +2814,7 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                             value: trials[i]['id'] as String,
                             child: Text(
                               'Ensayo ${i + 1} · ${trials[i]['status']}',
+                              overflow: TextOverflow.ellipsis,
                             ),
                           ),
                       ],
@@ -2615,6 +2825,38 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                 ],
               ),
               const SizedBox(height: 12),
+              if (report.individual.isNotEmpty) ...[
+                SizedBox(
+                  width: 300,
+                  child: DropdownButtonFormField<String>(
+                    key: ValueKey('analysis-client-$selectedClient'),
+                    isExpanded: true,
+                    initialValue: selectedClient,
+                    decoration: const InputDecoration(
+                      labelText: 'Vista de análisis',
+                    ),
+                    items: [
+                      const DropdownMenuItem(
+                        value: 'all',
+                        child: Text('General · todos los clientes'),
+                      ),
+                      for (final id in report.individual.keys)
+                        DropdownMenuItem(
+                          value: id,
+                          child: Text(
+                            'Cliente ${id.length > 12 ? id.substring(0, 12) : id}',
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                    ],
+                    onChanged: (value) {
+                      FocusManager.instance.primaryFocus?.unfocus();
+                      setState(() => selectedClient = value ?? 'all');
+                    },
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
               if (selected != null && items.isNotEmpty)
                 Wrap(
                   spacing: 8,
@@ -2639,6 +2881,77 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                   ),
                 )
               else ...[
+                AcrylicPanel(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        selectedClient == 'all'
+                            ? 'Interpretación general'
+                            : 'Interpretación del cliente',
+                        style: Theme.of(context).textTheme.titleLarge,
+                      ),
+                      const SizedBox(height: 8),
+                      Text(selectedSummary.interpretation),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+                if (serverMetric != null) ...[
+                  AcrylicPanel(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Métricas del servidor · último ensayo',
+                          style: Theme.of(context).textTheme.titleLarge,
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Duración ${serverMetric['server_elapsed_ms'] ?? '—'} ms · ${serverMetric['server_received_samples'] ?? '—'} muestras recibidas',
+                        ),
+                        Text(
+                          'Carga útil enviada ${serverMetric['server_payload_sent_bytes'] ?? '—'} B · recibida ${serverMetric['server_payload_received_bytes'] ?? '—'} B',
+                        ),
+                        Text(
+                          'Memoria RSS al finalizar ${serverMetric['server_rss_bytes_end'] ?? '—'} B',
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                ],
+                if (selectedClient == 'all' &&
+                    report.individual.length >= 2) ...[
+                  AcrylicPanel(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Resultados individuales',
+                          style: Theme.of(context).textTheme.titleLarge,
+                        ),
+                        const SizedBox(height: 10),
+                        for (final entry in report.individual.entries)
+                          ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            title: Text(
+                              'Cliente ${entry.key.length > 12 ? entry.key.substring(0, 12) : entry.key}',
+                            ),
+                            subtitle: Text(
+                              '${entry.value.total} muestras · ${entry.value.failed} fallos · distancia ${entry.value.medianDistanceM?.toStringAsFixed(2) ?? '—'} m',
+                            ),
+                            trailing: Text(
+                              '${entry.value.stats.mean?.toStringAsFixed(1) ?? '—'} ms',
+                            ),
+                            onTap: () =>
+                                setState(() => selectedClient = entry.key),
+                          ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                ],
                 Wrap(
                   spacing: 12,
                   runSpacing: 12,
@@ -2678,109 +2991,119 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                       ),
                       const SizedBox(height: 6),
                       Text(
-                        '${valid.length} respuestas válidas · ${items.length - valid.length} fallos · 7 clases',
+                        '${valid.length} respuestas válidas · ${selectedSummary.failed} fallos de red · 7 clases',
                       ),
-                      const SizedBox(height: 22),
-                      SizedBox(
-                        height: 260,
-                        child: BarChart(
-                          BarChartData(
-                            alignment: BarChartAlignment.spaceAround,
-                            maxY:
-                                bins
-                                    .map((b) => b.frequency.toDouble())
-                                    .fold<double>(0, math.max) +
-                                1,
-                            gridData: const FlGridData(show: false),
-                            borderData: FlBorderData(show: false),
-                            titlesData: FlTitlesData(
-                              topTitles: const AxisTitles(
-                                sideTitles: SideTitles(showTitles: false),
-                              ),
-                              rightTitles: const AxisTitles(
-                                sideTitles: SideTitles(showTitles: false),
-                              ),
-                              bottomTitles: AxisTitles(
-                                sideTitles: SideTitles(
-                                  showTitles: true,
-                                  getTitlesWidget: (value, meta) => Text(
-                                    '${value.toInt() + 1}',
-                                    style: const TextStyle(fontSize: 11),
+                      if (valid.isEmpty) ...[
+                        const SizedBox(height: 12),
+                        const Text(
+                          'Sin RTT válido para dibujar la distribución.',
+                        ),
+                      ] else ...[
+                        const SizedBox(height: 22),
+                        SizedBox(
+                          height: 260,
+                          child: BarChart(
+                            BarChartData(
+                              alignment: BarChartAlignment.spaceAround,
+                              maxY:
+                                  bins
+                                      .map((b) => b.frequency.toDouble())
+                                      .fold<double>(0, math.max) +
+                                  1,
+                              gridData: const FlGridData(show: false),
+                              borderData: FlBorderData(show: false),
+                              titlesData: FlTitlesData(
+                                topTitles: const AxisTitles(
+                                  sideTitles: SideTitles(showTitles: false),
+                                ),
+                                rightTitles: const AxisTitles(
+                                  sideTitles: SideTitles(showTitles: false),
+                                ),
+                                bottomTitles: AxisTitles(
+                                  sideTitles: SideTitles(
+                                    showTitles: true,
+                                    getTitlesWidget: (value, meta) => Text(
+                                      '${value.toInt() + 1}',
+                                      style: const TextStyle(fontSize: 11),
+                                    ),
                                   ),
                                 ),
                               ),
+                              barGroups: [
+                                for (var i = 0; i < bins.length; i++)
+                                  BarChartGroupData(
+                                    x: i,
+                                    barRods: [
+                                      BarChartRodData(
+                                        toY: bins[i].frequency.toDouble(),
+                                        width: 22,
+                                        color: Theme.of(context)
+                                            .colorScheme
+                                            .primary,
+                                        borderRadius:
+                                            const BorderRadius.vertical(
+                                              top: Radius.circular(6),
+                                            ),
+                                      ),
+                                    ],
+                                  ),
+                              ],
                             ),
-                            barGroups: [
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        const Text(
+                          'Clases numeradas de menor a mayor latencia. Tabla con límites exactos debajo.',
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+                if (valid.length >= 2) ScienceCharts(items: items),
+                if (bins.isNotEmpty) ...[
+                  const SizedBox(height: 16),
+                  AcrylicPanel(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Tabla de frecuencias',
+                          style: Theme.of(context).textTheme.titleLarge,
+                        ),
+                        const SizedBox(height: 12),
+                        SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: DataTable(
+                            columns: const [
+                              DataColumn(label: Text('Intervalo ms')),
+                              DataColumn(label: Text('fi')),
+                              DataColumn(label: Text('fr')),
+                              DataColumn(label: Text('Fi')),
+                            ],
+                            rows: [
                               for (var i = 0; i < bins.length; i++)
-                                BarChartGroupData(
-                                  x: i,
-                                  barRods: [
-                                    BarChartRodData(
-                                      toY: bins[i].frequency.toDouble(),
-                                      width: 22,
-                                      color: Theme.of(context)
-                                          .colorScheme
-                                          .primary,
-                                      borderRadius: const BorderRadius.vertical(
-                                        top: Radius.circular(6),
+                                DataRow(
+                                  cells: [
+                                    DataCell(
+                                      Text(
+                                        '[${bins[i].lower.toStringAsFixed(1)}, ${bins[i].upper.toStringAsFixed(1)}${i == bins.length - 1 ? ']' : ')'}',
                                       ),
                                     ),
+                                    DataCell(Text('${bins[i].frequency}')),
+                                    DataCell(
+                                      Text(bins[i].relative.toStringAsFixed(3)),
+                                    ),
+                                    DataCell(Text('${bins[i].cumulative}')),
                                   ],
                                 ),
                             ],
                           ),
                         ),
-                      ),
-                      const SizedBox(height: 8),
-                      const Text(
-                        'Clases numeradas de menor a mayor latencia. Tabla con límites exactos debajo.',
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
-                ),
-                const SizedBox(height: 16),
-                ScienceCharts(items: items),
-                const SizedBox(height: 16),
-                AcrylicPanel(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Tabla de frecuencias',
-                        style: Theme.of(context).textTheme.titleLarge,
-                      ),
-                      const SizedBox(height: 12),
-                      SingleChildScrollView(
-                        scrollDirection: Axis.horizontal,
-                        child: DataTable(
-                          columns: const [
-                            DataColumn(label: Text('Intervalo ms')),
-                            DataColumn(label: Text('fi')),
-                            DataColumn(label: Text('fr')),
-                            DataColumn(label: Text('Fi')),
-                          ],
-                          rows: [
-                            for (var i = 0; i < bins.length; i++)
-                              DataRow(
-                                cells: [
-                                  DataCell(
-                                    Text(
-                                      '[${bins[i].lower.toStringAsFixed(1)}, ${bins[i].upper.toStringAsFixed(1)}${i == bins.length - 1 ? ']' : ')'}',
-                                    ),
-                                  ),
-                                  DataCell(Text('${bins[i].frequency}')),
-                                  DataCell(
-                                    Text(bins[i].relative.toStringAsFixed(3)),
-                                  ),
-                                  DataCell(Text('${bins[i].cumulative}')),
-                                ],
-                              ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+                ],
                 const SizedBox(height: 16),
                 AcrylicPanel(
                   child: Column(
@@ -2841,7 +3164,12 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                 _InferencePanel(items: items, valid: valid),
               ],
               const SizedBox(height: 16),
-              const DistributionExplorer(),
+              ExpansionTile(
+                title: const Text('Explorador de distribuciones teóricas'),
+                onExpansionChanged: (_) =>
+                    FocusManager.instance.primaryFocus?.unfocus(),
+                children: const [DistributionExplorer()],
+              ),
             ],
           ),
         ),
@@ -2975,13 +3303,22 @@ class _InferencePanel extends StatelessWidget {
     final interval = valid.length >= 2
         ? InferenceEngine.meanInterval(valid)
         : null;
-    final probability = ProbabilityEngine.criticalByDistance(items);
+    final probability = items.any((m) => m.distanceM != null)
+        ? ProbabilityEngine.criticalByDistance(items)
+        : null;
     final e3 = items.where((m) => m.scenarioId == 'E3').toList();
     final pE3 = ProbabilityEngine.severeLagRate(e3);
     final lagP = EventModels.lagProbability(items);
-    final udp = items.where((m) => m.protocol == 'udp').toList();
+    final udp = items
+        .where((m) => m.protocol == 'udp' || m.protocol == 'udp-burst')
+        .toList();
     final udpTimeouts = udp
-        .where((m) => m.error?.toLowerCase().contains('timeout') ?? false)
+        .where(
+          (m) =>
+              !m.success &&
+              ((m.error?.toLowerCase().contains('timeout') ?? false) ||
+                  (m.error?.toLowerCase().contains('sin eco') ?? false)),
+        )
         .length;
     final poissonRate = EventModels.spikeRatePerMinute(items);
     final exponentialRate = EventModels.exponentialRate(items);
@@ -3071,56 +3408,66 @@ class _InferencePanel extends StatelessWidget {
           Text(
             'P(multicliente | lag > 50 ms): ${ProbabilityEngine.conditionalMultiGivenLag(items)?.letPercent() ?? 'sin datos'}',
           ),
-          Text('P(petición crítica): ${probability.total.letPercent()}'),
-          const SizedBox(height: 8),
-          const Text(
-            'Árbol de distancia y petición crítica (ponderación empírica):',
-          ),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: DataTable(
-              columns: const [
-                DataColumn(label: Text('Distancia')),
-                DataColumn(label: Text('P(Bᵢ)')),
-                DataColumn(label: Text('P(A|Bᵢ)')),
-                DataColumn(label: Text('P(A∩Bᵢ)')),
-                DataColumn(label: Text('P(Bᵢ|A)')),
-              ],
-              rows: [
-                for (final distance in probability.prior.keys)
-                  DataRow(
-                    cells: [
-                      DataCell(Text('${distance.toStringAsFixed(0)} m')),
-                      DataCell(
-                        Text(probability.prior[distance]!.toStringAsFixed(3)),
-                      ),
-                      DataCell(
-                        Text(
-                          probability.conditional[distance]!.toStringAsFixed(3),
-                        ),
-                      ),
-                      DataCell(
-                        Text(
-                          (probability.prior[distance]! *
-                                  probability.conditional[distance]!)
-                              .toStringAsFixed(3),
-                        ),
-                      ),
-                      DataCell(
-                        Text(
-                          probability.posterior[distance]?.toStringAsFixed(3) ??
-                              '—',
-                        ),
-                      ),
-                    ],
-                  ),
-              ],
+          if (probability == null)
+            const Text(
+              'Probabilidades por distancia: sin mediciones de distancia en esta selección.',
+            )
+          else ...[
+            Text('P(petición crítica): ${probability.total.letPercent()}'),
+            const SizedBox(height: 8),
+            const Text(
+              'Árbol de distancia y petición crítica (ponderación empírica):',
             ),
-          ),
-          if (probability.posterior.containsKey(12.0))
-            Text(
-              'P(12 m | petición crítica): ${probability.posterior[12.0]!.letPercent()}',
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: DataTable(
+                columns: const [
+                  DataColumn(label: Text('Distancia')),
+                  DataColumn(label: Text('P(Bᵢ)')),
+                  DataColumn(label: Text('P(A|Bᵢ)')),
+                  DataColumn(label: Text('P(A∩Bᵢ)')),
+                  DataColumn(label: Text('P(Bᵢ|A)')),
+                ],
+                rows: [
+                  for (final distance in probability.prior.keys)
+                    DataRow(
+                      cells: [
+                        DataCell(Text('${distance.toStringAsFixed(0)} m')),
+                        DataCell(
+                          Text(probability.prior[distance]!.toStringAsFixed(3)),
+                        ),
+                        DataCell(
+                          Text(
+                            probability.conditional[distance]!.toStringAsFixed(
+                              3,
+                            ),
+                          ),
+                        ),
+                        DataCell(
+                          Text(
+                            (probability.prior[distance]! *
+                                    probability.conditional[distance]!)
+                                .toStringAsFixed(3),
+                          ),
+                        ),
+                        DataCell(
+                          Text(
+                            probability.posterior[distance]?.toStringAsFixed(
+                                  3,
+                                ) ??
+                                '—',
+                          ),
+                        ),
+                      ],
+                    ),
+                ],
+              ),
             ),
+            if (probability.posterior.containsKey(12.0))
+              Text(
+                'P(12 m | petición crítica): ${probability.posterior[12.0]!.letPercent()}',
+              ),
+          ],
           if (pE3 != null)
             Text(
               'Binomial E3: P(5 lentas en 20, p=${pE3.toStringAsFixed(3)}): ${ProbabilityEngine.binomialPmf(20, 5, pE3).toStringAsFixed(4)}',

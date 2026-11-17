@@ -187,13 +187,19 @@ class ScienceCharts extends StatelessWidget {
               if (boxes.isEmpty)
                 const Text('Sin escenarios con latencias válidas.')
               else
-                LayoutBuilder(
-                  builder: (_, c) => CustomPaint(
-                    size: Size(c.maxWidth, 52.0 * boxes.length + 40),
-                    painter: _BoxPainter(
-                      boxes,
-                      primary,
-                      Theme.of(context).colorScheme.onSurface,
+                SizedBox(
+                  key: const ValueKey('box-chart-viewport'),
+                  height: math.min(320.0, 52.0 * boxes.length + 40),
+                  child: SingleChildScrollView(
+                    child: LayoutBuilder(
+                      builder: (_, c) => CustomPaint(
+                        size: Size(c.maxWidth, 52.0 * boxes.length + 40),
+                        painter: _BoxPainter(
+                          boxes,
+                          primary,
+                          Theme.of(context).colorScheme.onSurface,
+                        ),
+                      ),
                     ),
                   ),
                 ),

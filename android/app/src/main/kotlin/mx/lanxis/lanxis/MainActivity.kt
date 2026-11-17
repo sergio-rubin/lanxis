@@ -1,5 +1,6 @@
 package mx.lanxis.lanxis
 
+import android.app.Activity
 import android.Manifest
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.AdvertiseCallback
@@ -14,6 +15,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.wifi.WifiManager
+import android.net.wifi.SoftApConfiguration
 import android.net.wifi.rtt.RangingRequest
 import android.net.wifi.rtt.RangingResult
 import android.net.wifi.rtt.RangingResultCallback
@@ -23,13 +25,43 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
 import android.provider.Settings
-import io.flutter.embedding.android.FlutterActivity
+import androidx.activity.result.contract.ActivityResultContracts
+import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
-class MainActivity : FlutterActivity() {
+class MainActivity : FlutterFragmentActivity() {
+    private data class PendingExport(val file: File, val result: MethodChannel.Result)
+    private var pendingExport: PendingExport? = null
+    private val exportLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { outcome ->
+        val pending = pendingExport ?: return@registerForActivityResult
+        pendingExport = null
+        val uri = if (outcome.resultCode == Activity.RESULT_OK) outcome.data?.data else null
+        if (uri == null) {
+            pending.file.delete()
+            pending.result.success(null)
+        } else {
+            Thread {
+                try {
+                    val output = contentResolver.openOutputStream(uri, "w")
+                        ?: throw IllegalStateException("No se pudo abrir el documento seleccionado.")
+                    output.use { destination -> pending.file.inputStream().use { it.copyTo(destination) } }
+                    runOnUiThread { pending.result.success(uri.toString()) }
+                } catch (error: Exception) {
+                    runOnUiThread {
+                        pending.result.error("save_failed", error.message, null)
+                    }
+                } finally {
+                    pending.file.delete()
+                }
+            }.start()
+        }
+    }
     private var reservation: WifiManager.LocalOnlyHotspotReservation? = null
     private var pendingStart: MethodChannel.Result? = null
     private var pendingDistance: Pair<String, MethodChannel.Result>? = null
@@ -55,6 +87,26 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "mx.lanxis/participant")
+            .setMethodCallHandler { call, result ->
+                try {
+                    when (call.method) {
+                        "start" -> {
+                            val intent = Intent(this, ParticipantForegroundService::class.java)
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent)
+                            else startService(intent)
+                            result.success(null)
+                        }
+                        "stop" -> {
+                            stopService(Intent(this, ParticipantForegroundService::class.java))
+                            result.success(null)
+                        }
+                        else -> result.notImplemented()
+                    }
+                } catch (error: Exception) {
+                    result.error("participant_service", error.message, null)
+                }
+            }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "mx.lanxis/hotspot")
             .setMethodCallHandler { call, result -> handle(call, result) }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "mx.lanxis/distance")
@@ -67,6 +119,38 @@ class MainActivity : FlutterActivity() {
                     "startBeacon" -> startBeacon(call.argument<String>("token"), result)
                     "stopBeacon" -> stopBeacon(result)
                     else -> result.notImplemented()
+                }
+            }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "mx.lanxis/export")
+            .setMethodCallHandler { call, result ->
+                if (call.method != "saveDocument") {
+                    result.notImplemented()
+                } else if (pendingExport != null) {
+                    result.error("busy", "Ya hay una exportación abierta.", null)
+                } else {
+                    val name = call.argument<String>("name")
+                    val mime = call.argument<String>("mime")
+                    val path = call.argument<String>("path")
+                    val file = path?.let { File(it) }
+                    val trustedFile = file != null && file.isFile &&
+                        file.canonicalPath.startsWith(cacheDir.canonicalPath + File.separator)
+                    if (name.isNullOrBlank() || mime.isNullOrBlank() || !trustedFile) {
+                        result.error("invalid_export", "Faltan datos de exportación.", null)
+                    } else {
+                        pendingExport = PendingExport(file!!, result)
+                        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                            addCategory(Intent.CATEGORY_OPENABLE)
+                            type = mime
+                            putExtra(Intent.EXTRA_TITLE, name)
+                        }
+                        try {
+                            exportLauncher.launch(intent)
+                        } catch (error: Exception) {
+                            pendingExport = null
+                            file?.delete()
+                            result.error("picker_failed", error.message, null)
+                        }
+                    }
                 }
             }
     }
@@ -94,24 +178,35 @@ class MainActivity : FlutterActivity() {
         val active = reservation != null
         val ssid: String?
         val passphrase: String?
+        val security: String
         if (active && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             val config = reservation!!.softApConfiguration
             ssid = config.ssid
             passphrase = config.passphrase
+            security = when (config.securityType) {
+                SoftApConfiguration.SECURITY_TYPE_WPA3_SAE -> "SAE"
+                SoftApConfiguration.SECURITY_TYPE_OPEN,
+                SoftApConfiguration.SECURITY_TYPE_WPA3_OWE,
+                SoftApConfiguration.SECURITY_TYPE_WPA3_OWE_TRANSITION -> "nopass"
+                else -> "WPA"
+            }
         } else if (active) {
             @Suppress("DEPRECATION")
             val config = reservation!!.wifiConfiguration
             ssid = config?.SSID
             passphrase = config?.preSharedKey
+            security = "WPA"
         } else {
             ssid = null
             passphrase = null
+            security = "WPA"
         }
         return mapOf(
             "supported" to supported,
             "active" to active,
             "ssid" to ssid,
             "passphrase" to passphrase,
+            "security" to security,
             "reason" to if (supported) null else "El dispositivo no admite hotspot local desde aplicaciones."
         )
     }
