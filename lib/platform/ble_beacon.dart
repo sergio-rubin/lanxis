@@ -21,10 +21,15 @@ class BleBeacon {
         .join();
     if (Platform.isAndroid) {
       await _android.invokeMethod<void>('startBeacon', {'token': token});
-      return BleBeacon._(token, () => _android.invokeMethod<void>('stopBeacon'));
+      return BleBeacon._(
+        token,
+        () => _android.invokeMethod<void>('stopBeacon'),
+      );
     }
     if (!Platform.isLinux) {
-      throw UnsupportedError('Publicidad BLE no disponible en esta plataforma.');
+      throw UnsupportedError(
+        'Publicidad BLE no disponible en esta plataforma.',
+      );
     }
     final bus = DBusClient.system();
     try {
