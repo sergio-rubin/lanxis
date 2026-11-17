@@ -931,6 +931,7 @@ class _NetworkScreenState extends State<NetworkScreen>
   String preset = 'latency';
   bool serverMode = false;
   bool connected = false;
+  bool serverAdvertisesBle = false;
   String? connectedName;
   String? busyAction;
   bool busy = false;
@@ -960,6 +961,7 @@ class _NetworkScreenState extends State<NetworkScreen>
       setState(() {
         connected = false;
         connectedName = null;
+        serverAdvertisesBle = false;
       });
     }
   }
@@ -1116,12 +1118,16 @@ class _NetworkScreenState extends State<NetworkScreen>
       setState(() {
         connected = true;
         connectedName = '${info['name'] ?? uri.host}';
-        feedback = 'Conectado a $connectedName. Ya puedes preparar un ensayo.';
+        serverAdvertisesBle = info['distance_beacon_token'] is String;
+        feedback =
+            'Conectado a $connectedName. Ya puedes preparar un ensayo. '
+            '${serverAdvertisesBle ? 'La baliza Bluetooth se usará solo para estimar distancia.' : 'No se anunció baliza Bluetooth; la distancia puede quedar sin dato.'}';
       });
     } catch (e) {
       if (mounted) {
         setState(() {
           connected = false;
+          serverAdvertisesBle = false;
           feedback =
               'No se pudo conectar. Comprueba la misma Wi-Fi, la URL y el código. Detalle: $e';
         });
@@ -1391,11 +1397,17 @@ class _NetworkScreenState extends State<NetworkScreen>
         );
         final successes = results.where((item) => item.success).length;
         if (!mounted) return;
-        final distanceStatus =
-            results.isNotEmpty && results.first.distanceM != null
-            ? 'Distancia ${results.first.distanceM!.toStringAsFixed(1)} m '
-                  '(${results.first.distanceSource}).'
-            : 'Distancia no disponible; se guardó sin inventar un valor.';
+        final first = results.firstOrNull;
+        final distanceStatus = first?.distanceM == null
+            ? 'Distancia no disponible: '
+                  '${widget.network.lastDistanceReason ?? 'el dispositivo no ofreció una medición fiable'}. '
+                  'Se guardó sin inventar un valor.'
+            : first!.distanceSource.startsWith('ble_rssi_estimate')
+            ? 'Distancia BLE ${first.distanceSource.endsWith('sparse') ? 'estimada con pocas lecturas' : 'estimada'}: ${first.distanceM!.toStringAsFixed(1)} m '
+                  'con margen orientativo ±${first.distanceUncertaintyM?.toStringAsFixed(1) ?? '—'} m. '
+                  'Requiere calibración para uso preciso.'
+            : 'Distancia ${first.distanceM!.toStringAsFixed(1)} m '
+                  '(${first.distanceSource}).';
         setState(
           () => feedback =
               'Ensayo ${cancel ? 'cancelado' : 'terminado'}: '
@@ -1612,6 +1624,15 @@ class _NetworkScreenState extends State<NetworkScreen>
                           '${widget.network.connectedClients} conectados · '
                           '${widget.network.readyWorkers} listos para ensayos coordinados',
                         ),
+                        const SizedBox(height: 6),
+                        Text(
+                          widget.network.bleBeaconActive
+                              ? 'Baliza Bluetooth activa: los clientes compatibles estimarán distancia automáticamente, sin emparejarse.'
+                              : widget.network.bleBeaconError != null
+                              ? 'Baliza Bluetooth no disponible: ${widget.network.bleBeaconError}'
+                              : 'Distancia Bluetooth no disponible en este servidor.',
+                          style: theme.textTheme.bodySmall,
+                        ),
                         const SizedBox(height: 12),
                       ] else ...[
                         const Text(
@@ -1675,15 +1696,23 @@ class _NetworkScreenState extends State<NetworkScreen>
                                               : 'Crear hotspot',
                                         ),
                                       ),
-                                    if (Platform.isAndroid)
-                                      TextButton.icon(
-                                        onPressed: () => hotspotAdapter
-                                            .openSystemWifiSettings(),
-                                        icon: const Icon(
-                                          Icons.settings_outlined,
-                                        ),
-                                        label: const Text('Ajustes Wi-Fi'),
-                                      ),
+                                    TextButton.icon(
+                                      onPressed: () async {
+                                        try {
+                                          await hotspotAdapter
+                                              .openSystemWifiSettings();
+                                        } catch (error) {
+                                          if (mounted) {
+                                            setState(
+                                              () => feedback =
+                                                  'No se pudieron abrir los ajustes Wi-Fi: $error',
+                                            );
+                                          }
+                                        }
+                                      },
+                                      icon: const Icon(Icons.settings_outlined),
+                                      label: const Text('Ajustes Wi-Fi'),
+                                    ),
                                   ],
                                 ),
                               ],
@@ -1759,6 +1788,11 @@ class _NetworkScreenState extends State<NetworkScreen>
                             fontWeight: FontWeight.w700,
                           ),
                         ),
+                        if (serverAdvertisesBle)
+                          const Text(
+                            'Distancia automática: baliza Bluetooth disponible; '
+                            'se estima al iniciar el ensayo.',
+                          ),
                       ],
                       const SizedBox(height: 10),
                       ExpansionTile(
@@ -2071,7 +2105,8 @@ class _NetworkScreenState extends State<NetworkScreen>
                                 const SizedBox(height: 8),
                                 const Text(
                                   'La distancia objetivo define la condición E1–E6. '
-                                  'LANXIS intenta medir la distancia real por Wi-Fi RTT '
+                                  'LANXIS intenta estimar la distancia al servidor '
+                                  'mediante su baliza Bluetooth o medirla por Wi-Fi RTT '
                                   'cuando el servidor es un punto de acceso compatible.',
                                 ),
                               ],
@@ -2263,9 +2298,11 @@ class _NetworkScreenState extends State<NetworkScreen>
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               const Text(
-                                'Wi-Fi RTT mide al punto de acceso compatible. '
-                                'Si el servidor es otro equipo en la red, la distancia '
-                                'queda sin dato para evitar una cifra falsa.',
+                                'LANXIS busca automáticamente una baliza Bluetooth del servidor '
+                                'y estima metros con un margen orientativo. Bluetooth solo aporta '
+                                'distancia; el ensayo sigue usando HTTP, TCP o UDP. '
+                                'Si no hay baliza, intenta Wi-Fi RTT con un punto de acceso '
+                                'compatible. Puedes registrar una medición externa si la tienes.',
                               ),
                               const SizedBox(height: 10),
                               _NumberField(
@@ -2468,6 +2505,16 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
               const Text(
                 'Estadística descriptiva de observaciones reales. Fallos conservados, sin imputar latencias.',
               ),
+              if (items.any(
+                (m) => m.distanceSource.startsWith('ble_rssi_estimate'),
+              )) ...[
+                const SizedBox(height: 8),
+                const Text(
+                  'Las distancias BLE de esta selección son estimaciones por RSSI '
+                  'con incertidumbre amplia. Interpreta cualquier relación con '
+                  'la latencia como exploratoria.',
+                ),
+              ],
               const SizedBox(height: 22),
               Wrap(
                 spacing: 12,

@@ -21,6 +21,7 @@ dependencies:
   data: ^0.15.2
   archive: ^4.7.1
   pdf: ^3.13.1
+  dbus: ^0.8.0
 
 dev_dependencies:
   flutter_test:

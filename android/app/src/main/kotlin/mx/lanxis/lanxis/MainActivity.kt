@@ -1,6 +1,15 @@
 package mx.lanxis.lanxis
 
 import android.Manifest
+import android.bluetooth.BluetoothManager
+import android.bluetooth.le.AdvertiseCallback
+import android.bluetooth.le.AdvertiseData
+import android.bluetooth.le.AdvertiseSettings
+import android.bluetooth.le.BluetoothLeAdvertiser
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -12,18 +21,34 @@ import android.net.wifi.rtt.WifiRttManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.ParcelUuid
 import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : FlutterActivity() {
     private var reservation: WifiManager.LocalOnlyHotspotReservation? = null
     private var pendingStart: MethodChannel.Result? = null
     private var pendingDistance: Pair<String, MethodChannel.Result>? = null
+    private data class PendingBle(
+        val host: String,
+        val token: ByteArray,
+        val result: MethodChannel.Result
+    )
+    private var pendingBle: PendingBle? = null
+    private var activeBleCancel: (() -> Unit)? = null
+    private var beaconAdvertiser: BluetoothLeAdvertiser? = null
+    private var beaconCallback: AdvertiseCallback? = null
+    private var pendingBeaconStart: Pair<ByteArray, MethodChannel.Result>? = null
+    private var beaconGeneration = 0
     private val permissionRequest = 9127
     private val distancePermissionRequest = 9128
+    private val blePermissionRequest = 9129
+    private val beaconPermissionRequest = 9130
+    private val beaconUuid = ParcelUuid.fromString("a7f58c20-ff3b-4f92-b11a-17f855bc6049")
     private val wifi: WifiManager by lazy {
         applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
     }
@@ -34,9 +59,15 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result -> handle(call, result) }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "mx.lanxis/distance")
             .setMethodCallHandler { call, result ->
-                if (call.method == "measureToServer") {
-                    measureToServer(call.argument<String>("host") ?: "", result)
-                } else result.notImplemented()
+                when (call.method) {
+                    "measureToServer" -> measureDistance(
+                        call.argument<String>("host") ?: "",
+                        call.argument<String>("beaconToken"), result
+                    )
+                    "startBeacon" -> startBeacon(call.argument<String>("token"), result)
+                    "stopBeacon" -> stopBeacon(result)
+                    else -> result.notImplemented()
+                }
             }
     }
 
@@ -134,6 +165,208 @@ class MainActivity : FlutterActivity() {
         result.success(mapOf("reason" to reason))
     }
 
+    private fun decodeToken(value: String?): ByteArray? {
+        if (value == null || !Regex("^[0-9a-fA-F]{12}$").matches(value)) return null
+        return ByteArray(6) { index ->
+            value.substring(index * 2, index * 2 + 2).toInt(16).toByte()
+        }
+    }
+
+    private fun startBeacon(value: String?, result: MethodChannel.Result) {
+        val token = decodeToken(value)
+        if (token == null) {
+            result.error("invalid_token", "Identificador BLE inválido.", null)
+            return
+        }
+        if (!packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE)) {
+            result.error("ble_unavailable", "Este teléfono no admite Bluetooth LE.", null)
+            return
+        }
+        if (beaconCallback != null) {
+            result.success(null)
+            return
+        }
+        beaconGeneration++
+        val missing = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            for (permission in arrayOf(
+                Manifest.permission.BLUETOOTH_ADVERTISE,
+                Manifest.permission.BLUETOOTH_CONNECT
+            )) {
+                if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) {
+                    missing.add(permission)
+                }
+            }
+        }
+        if (missing.isNotEmpty()) {
+            if (pendingBeaconStart != null) {
+                result.error("busy", "Ya hay una solicitud de baliza BLE en curso.", null)
+                return
+            }
+            pendingBeaconStart = Pair(token, result)
+            requestPermissions(missing.toTypedArray(), beaconPermissionRequest)
+        } else {
+            beginBeacon(token, result)
+        }
+    }
+
+    private fun beginBeacon(token: ByteArray, result: MethodChannel.Result) {
+        try {
+            val generation = beaconGeneration
+            val adapter = (getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)
+                ?.adapter
+            val advertiser = adapter?.bluetoothLeAdvertiser
+            if (advertiser == null) {
+                result.error("ble_unavailable", "Activa Bluetooth; este teléfono no puede anunciar una baliza BLE.", null)
+                return
+            }
+            val data = AdvertiseData.Builder()
+                .addServiceData(beaconUuid, token)
+                .setIncludeDeviceName(false)
+                .build()
+            val settings = AdvertiseSettings.Builder()
+                .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+                .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
+                .setConnectable(false)
+                .build()
+            val callback = object : AdvertiseCallback() {
+                override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
+                    if (generation != beaconGeneration) {
+                        advertiser.stopAdvertising(this)
+                        result.error("cancelled", "Baliza BLE cancelada.", null)
+                        return
+                    }
+                    beaconAdvertiser = advertiser
+                    beaconCallback = this
+                    result.success(null)
+                }
+                override fun onStartFailure(errorCode: Int) {
+                    beaconAdvertiser = null
+                    beaconCallback = null
+                    result.error("ble_advertise_failed",
+                        "Android rechazó la baliza BLE (código $errorCode).", null)
+                }
+            }
+            advertiser.startAdvertising(settings, data, callback)
+        } catch (error: Exception) {
+            result.error("ble_advertise_failed", error.message, null)
+        }
+    }
+
+    private fun stopBeacon(result: MethodChannel.Result) {
+        beaconGeneration++
+        pendingBeaconStart?.second?.error("cancelled", "Baliza BLE cancelada.", null)
+        pendingBeaconStart = null
+        val callback = beaconCallback
+        if (callback != null) {
+            try { beaconAdvertiser?.stopAdvertising(callback) } catch (_: Exception) { }
+        }
+        beaconAdvertiser = null
+        beaconCallback = null
+        result.success(null)
+    }
+
+    private fun measureDistance(
+        host: String,
+        beaconToken: String?,
+        result: MethodChannel.Result
+    ) {
+        val token = decodeToken(beaconToken)
+        if (token == null ||
+            !packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE)) {
+            measureToServer(host, result)
+            return
+        }
+        val missing = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            for (permission in arrayOf(
+                Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.BLUETOOTH_CONNECT
+            )) {
+                if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) {
+                    missing.add(permission)
+                }
+            }
+        }
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) !=
+            PackageManager.PERMISSION_GRANTED) {
+            missing.add(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+        val request = PendingBle(host, token, result)
+        if (missing.isNotEmpty()) {
+            if (pendingBle != null) {
+                unavailable(result, "Ya hay una medición Bluetooth en curso.")
+                return
+            }
+            pendingBle = request
+            requestPermissions(missing.toTypedArray(), blePermissionRequest)
+        } else {
+            scanBeacon(request)
+        }
+    }
+
+    private fun scanBeacon(request: PendingBle) {
+        try {
+            val manager = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+            val scanner = manager?.adapter?.bluetoothLeScanner
+            if (scanner == null) {
+                unavailable(request.result, "Activa Bluetooth para estimar la distancia al servidor.")
+                return
+            }
+            val handler = Handler(Looper.getMainLooper())
+            val done = AtomicBoolean(false)
+            val samples = mutableListOf<Int>()
+            lateinit var callback: ScanCallback
+            fun finish(reason: String?) {
+                if (!done.compareAndSet(false, true)) return
+                activeBleCancel = null
+                try { scanner.stopScan(callback) } catch (_: Exception) { }
+                if (samples.size < 3) {
+                    if (packageManager.hasSystemFeature(PackageManager.FEATURE_WIFI_RTT)) {
+                        measureToServer(request.host, request.result)
+                    } else {
+                        unavailable(request.result, reason ?:
+                            "No se detectó la baliza Bluetooth del servidor. Acerca ambos equipos y comprueba Bluetooth.")
+                    }
+                    return
+                }
+                request.result.success(mapOf(
+                    "source" to "ble_rssi_samples",
+                    "rssi_samples_dbm" to samples.toList()
+                ))
+            }
+            callback = object : ScanCallback() {
+                override fun onScanResult(callbackType: Int, result: ScanResult) {
+                    val data = result.scanRecord?.getServiceData(beaconUuid)
+                    if (data?.contentEquals(request.token) == true && result.rssi in -110..-20) {
+                        handler.post {
+                            if (!done.get()) {
+                                samples.add(result.rssi)
+                                if (samples.size >= 12) finish(null)
+                            }
+                        }
+                    }
+                }
+                override fun onScanFailed(errorCode: Int) {
+                    handler.post { finish("Bluetooth no pudo buscar balizas (código $errorCode).") }
+                }
+            }
+            val filter = ScanFilter.Builder()
+                .setServiceData(beaconUuid, request.token)
+                .build()
+            val settings = ScanSettings.Builder()
+                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                .build()
+            scanner.startScan(listOf(filter), settings, callback)
+            activeBleCancel = { finish("Medición Bluetooth interrumpida.") }
+            handler.postDelayed({ finish(null) }, 5000)
+        } catch (error: SecurityException) {
+            unavailable(request.result, "Sin permiso para buscar balizas Bluetooth: ${error.message}")
+        } catch (error: Exception) {
+            unavailable(request.result, "Bluetooth no pudo medir: ${error.message}")
+        }
+    }
+
     private fun measureToServer(host: String, result: MethodChannel.Result) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P ||
             !packageManager.hasSystemFeature(PackageManager.FEATURE_WIFI_RTT)) {
@@ -211,6 +444,30 @@ class MainActivity : FlutterActivity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == beaconPermissionRequest) {
+            val pending = pendingBeaconStart ?: return
+            pendingBeaconStart = null
+            if (grantResults.isNotEmpty() &&
+                grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+                beginBeacon(pending.first, pending.second)
+            } else {
+                pending.second.error("permission_denied",
+                    "Permiso Bluetooth denegado para anunciar distancia.", null)
+            }
+            return
+        }
+        if (requestCode == blePermissionRequest) {
+            val pending = pendingBle ?: return
+            pendingBle = null
+            if (grantResults.isNotEmpty() &&
+                grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+                scanBeacon(pending)
+            } else {
+                unavailable(pending.result,
+                    "Permisos Bluetooth y ubicación precisa necesarios para estimar distancia.")
+            }
+            return
+        }
         if (requestCode == distancePermissionRequest) {
             val pending = pendingDistance ?: return
             pendingDistance = null
@@ -233,6 +490,14 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        activeBleCancel?.invoke()
+        activeBleCancel = null
+        val callback = beaconCallback
+        if (callback != null) {
+            try { beaconAdvertiser?.stopAdvertising(callback) } catch (_: Exception) { }
+        }
+        beaconAdvertiser = null
+        beaconCallback = null
         reservation?.close()
         reservation = null
         super.onDestroy()

@@ -65,6 +65,16 @@ class PlatformHotspotAdapter implements HotspotAdapter {
   Future<void> openSystemWifiSettings() async {
     if (Platform.isAndroid) {
       await _channel.invokeMethod<void>('openWifiSettings');
+    } else if (Platform.isWindows) {
+      await Process.start('explorer.exe', [
+        'ms-settings:network-wifi',
+      ], mode: ProcessStartMode.detached);
+    } else if (Platform.isLinux) {
+      await Process.start(
+        'nm-connection-editor',
+        const [],
+        mode: ProcessStartMode.detached,
+      );
     }
   }
 

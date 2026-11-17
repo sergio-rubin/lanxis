@@ -20,5 +20,6 @@ Dependencias directas verificadas en el caché de `pub.dev` el 16 de noviembre d
 | `data` | 0.15.2 | MIT |
 | `archive` | 4.7.1 | MIT |
 | `pdf` | 3.13.1 | Apache-2.0 |
+| `dbus` | 0.8.0 | MPL-2.0 |
 
 Los textos completos de dependencias transitivas se encuentran en sus paquetes, fijados en `pubspec.lock`; la distribución binaria debe incluir el listado de licencias generado por Flutter.

@@ -9,6 +9,7 @@ import 'package:uuid/uuid.dart';
 import '../core/models.dart';
 import '../data/lab_repository.dart';
 import '../platform/distance_probe.dart';
+import '../platform/ble_beacon.dart';
 import 'tcp_transfer.dart';
 import 'udp_echo.dart';
 
@@ -53,6 +54,9 @@ class NetworkLab {
   TcpTransferServer? _tcpTransfer;
   UdpEchoServer? _udpEcho;
   RawDatagramSocket? _discoverySocket;
+  BleBeacon? _bleBeacon;
+  String? bleBeaconError;
+  bool get bleBeaconActive => _bleBeacon != null;
   StreamSubscription<RawSocketEvent>? _discoverySubscription;
   int _activeTransfers = 0;
   String? _pairCode;
@@ -65,6 +69,7 @@ class NetworkLab {
   final Set<String> _staleResultIds = {};
   Future<void>? _participantTask;
   String? lastParticipantError;
+  String? lastDistanceReason;
 
   bool get isServing => _server != null;
   int? get port => _server?.port;
@@ -129,11 +134,21 @@ class NetworkLab {
     } on SocketException {
       // Manual IP connection remains available when UDP is blocked or occupied.
     }
+    if ((Platform.isLinux || Platform.isAndroid) && server.port == 8040) {
+      try {
+        _bleBeacon = await BleBeacon.start();
+        bleBeaconError = null;
+      } catch (error) {
+        bleBeaconError = '$error';
+      }
+    }
     unawaited(server.forEach(_handleRequest));
     return server.port;
   }
 
   Future<void> stopServer() async {
+    await _bleBeacon?.close();
+    _bleBeacon = null;
     await _udpEcho?.close();
     _udpEcho = null;
     await _tcpTransfer?.close();
@@ -328,7 +343,9 @@ class NetworkLab {
               if (_tcpTransfer != null) 'tcp-transfer',
               if (_udpEcho != null) 'udp-echo',
               if (_discoverySocket != null) 'udp-discovery',
+              if (_bleBeacon != null) 'ble-distance-estimate',
             ],
+            if (_bleBeacon != null) 'distance_beacon_token': _bleBeacon!.token,
           }),
         );
       } else if (request.headers.value('X-Lanxis-Code') != _pairCode) {
@@ -456,6 +473,7 @@ class NetworkLab {
                     jitterMs: (raw['jitter_ms'] as num?)?.toDouble(),
                     speedMbps: (raw['velocidad_mbps'] as num?)?.toDouble(),
                     httpStatus: raw['http_status'] as int?,
+                    rssiDbm: raw['rssi_dbm'] as int?,
                     error: raw['error'] as String?,
                     warmup: raw['warmup'] == true,
                     protocol:
@@ -960,9 +978,9 @@ class NetworkLab {
       );
     }
     await register(base, code);
-    final capabilities = config.protocol == 'http' ? null : await probe(base);
-    final tcpPort = capabilities?['tcp_port'] as int?;
-    final udpPort = capabilities?['udp_port'] as int?;
+    final capabilities = await probe(base);
+    final tcpPort = capabilities['tcp_port'] as int?;
+    final udpPort = capabilities['udp_port'] as int?;
     if (config.protocol == 'tcp' && tcpPort == null) {
       throw UnsupportedError('Este servidor no ofrece transferencias TCP');
     }
@@ -970,13 +988,18 @@ class NetworkLab {
       throw UnsupportedError('Este servidor no ofrece eco UDP');
     }
     final observation = config.distanceM == null
-        ? await const DistanceProbe().measure(base)
+        ? await const DistanceProbe().measure(
+            base,
+            beaconToken: capabilities['distance_beacon_token'] as String?,
+            environment: config.environment,
+          )
         : DistanceObservation(
             meters: config.distanceM,
             source: config.distanceSource == 'unknown'
                 ? 'manual'
                 : config.distanceSource,
           );
+    lastDistanceReason = observation.reason;
     final effectiveConfig = config.withDistance(
       observation.meters,
       observation.source,
@@ -988,6 +1011,33 @@ class NetworkLab {
       effectiveConfig,
     );
     final trialId = repository.startTrial(testId);
+    if (observation.meters == null && observation.reason != null) {
+      repository.addEvent(
+        'distance_unavailable',
+        sessionId: session.id,
+        phaseId: phase.id,
+        testId: testId,
+        trialId: trialId,
+        metadataJson: jsonEncode({'reason': observation.reason}),
+      );
+    }
+    if (observation.source.startsWith('ble_rssi_estimate')) {
+      repository.addEvent(
+        'distance_estimated',
+        sessionId: session.id,
+        phaseId: phase.id,
+        testId: testId,
+        trialId: trialId,
+        metadataJson: jsonEncode({
+          'source': observation.source,
+          'distance_m': observation.meters,
+          'uncertainty_m': observation.uncertaintyM,
+          'rssi_samples_dbm': observation.rssiSamplesDbm,
+          'model': 'log_distance_uncalibrated_v1',
+          'environment': config.environment,
+        }),
+      );
+    }
     final client = HttpClient()
       ..connectionTimeout = Duration(milliseconds: config.timeoutMs);
     final results = <Measurement>[];
@@ -1156,6 +1206,9 @@ class NetworkLab {
           jitterMs: jitter,
           speedMbps: speed,
           httpStatus: httpStatus,
+          // This column is reserved for Wi-Fi signal measurements. BLE RSSI
+          // is provenance for distance only, stored in distance_estimated.
+          rssiDbm: null,
           error: error,
           warmup: i < config.warmup,
           protocol: config.protocol,

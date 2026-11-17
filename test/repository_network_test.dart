@@ -29,6 +29,37 @@ void main() {
     expect(found.single.uri, Uri.parse('http://127.0.0.1:${server.port}'));
   });
 
+  test(
+    'missing ranging hardware keeps the trial and explains the gap',
+    () async {
+      final repo = LabRepository.inMemory();
+      final network = NetworkLab(repo);
+      addTearDown(() async {
+        await network.stopServer();
+        repo.dispose();
+      });
+      final port = await network.startServer(port: 0);
+      final session = repo.createSession('Distancia opcional');
+      final phase = repo.createPhase(session.id, 'Sin sensor');
+      final samples = await network.runTrial(
+        base: Uri.parse('http://127.0.0.1:$port'),
+        code: network.pairCode!,
+        session: session,
+        phase: phase,
+        config: const TrialConfig(
+          scenarioId: 'E1',
+          clients: 1,
+          count: 1,
+          warmup: 0,
+          intervalMs: 0,
+        ),
+      );
+      expect(samples.single.success, true);
+      expect(samples.single.distanceM, isNull);
+      expect(network.lastDistanceReason, isNotEmpty);
+    },
+  );
+
   test('client identity and result outbox survive reopening SQLite', () async {
     final directory = await Directory.systemTemp.createTemp('lanxis-outbox-');
     addTearDown(() => directory.delete(recursive: true));
